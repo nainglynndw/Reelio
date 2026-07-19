@@ -13,7 +13,7 @@ export async function publishJob(job, platformIds, onProgress = async () => {}, 
       await onProgress(platformId, { status: "starting", progress: 0, message: `Starting ${platformId} upload…` });
       if (platformId === "youtube") results.youtube = await uploadYouTube(job, (result) => onProgress(platformId, result), reuploadPlatforms.has(platformId));
       else if (platformId === "tiktok") results.tiktok = await uploadTikTokInbox(job, (result) => onProgress(platformId, result), reuploadPlatforms.has(platformId));
-      else if (platformId === "facebook") results.facebook = await uploadFacebookReel(job);
+      else if (platformId === "facebook") results.facebook = await uploadFacebookReel(job, (result) => onProgress(platformId, result));
       else if (platformId === "instagram") results.instagram = await uploadInstagramReel(job);
       else results[platformId] = { status: "unsupported", message: "No connector is registered for this platform." };
     } catch (error) {
@@ -248,7 +248,7 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function uploadFacebookReel(job) {
+async function uploadFacebookReel(job, onProgress = async () => {}) {
   const pageId = process.env.FACEBOOK_PAGE_ID;
   const token = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
   const version = process.env.META_GRAPH_VERSION;
@@ -258,24 +258,29 @@ async function uploadFacebookReel(job) {
   if (!pageCheck.ok) throw new Error(apiMessage(page, "Facebook Page token verification failed."));
   if (String(page.id) !== String(pageId)) throw new Error("The Facebook Page ID and Page access token belong to different Pages. Copy both from the same /me/accounts entry.");
   const base = `https://graph.facebook.com/${version}/${pageId}/video_reels`;
+  await onProgress({ status: "starting", progress: 5, message: "Creating a Facebook Reel upload session…" });
   const start = await fetchWithTimeout(`${base}?upload_phase=start&access_token=${encodeURIComponent(token)}`, { method: "POST" });
-  const startResult = await start.json();
-  if (!start.ok) throw new Error(apiMessage(startResult, "Facebook Reel initialization failed."));
+  const startResult = await readApiPayload(start);
+  if (!start.ok) throw new Error(apiMessage(startResult, responseFallback(start, "Facebook Reel initialization failed.")));
+  if (!startResult.upload_url || !startResult.video_id) throw new Error("Facebook created an incomplete Reel upload session. Retry the upload.");
   const size = (await stat(job.assets.final.file)).size;
+  await onProgress({ status: "uploading", progress: 10, bytesUploaded: 0, bytesTotal: size, message: "Uploading the video file to Facebook…" });
   const upload = await fetchWithTimeout(startResult.upload_url, {
     method: "POST",
-    headers: { Authorization: `OAuth ${token}`, "Content-Type": "application/octet-stream", file_size: String(size), "Content-Length": String(size) },
+    headers: { Authorization: `OAuth ${token}`, "Content-Type": "application/octet-stream", offset: "0", file_size: String(size), "Content-Length": String(size) },
     body: createReadStream(job.assets.final.file),
     duplex: "half",
   }, 300_000);
-  const uploadResult = await upload.json().catch(() => ({}));
-  if (!upload.ok) throw new Error(apiMessage(uploadResult, "Facebook Reel upload failed."));
+  const uploadResult = await readApiPayload(upload);
+  if (!upload.ok) throw new Error(apiMessage(uploadResult, responseFallback(upload, "Facebook Reel upload failed.")));
+  if (uploadResult.success === false) throw new Error(apiMessage(uploadResult, "Facebook rejected the video transfer."));
+  await onProgress({ status: "verifying", progress: 100, bytesUploaded: size, bytesTotal: size, message: "Upload complete. Asking Facebook to publish the Reel…" });
   const copy = postCopy(job, "facebook");
   const finishParams = new URLSearchParams({ upload_phase: "finish", video_id: startResult.video_id, video_state: "PUBLISHED", description: `${copy.caption}\n\n${copy.description}`, access_token: token });
   const finish = await fetchWithTimeout(`${base}?${finishParams}`, { method: "POST" });
-  const finishResult = await finish.json();
-  if (!finish.ok) throw new Error(apiMessage(finishResult, "Facebook Reel publish failed."));
-  return { status: "published", id: startResult.video_id, manageUrl: "https://business.facebook.com/latest/content", response: finishResult };
+  const finishResult = await readApiPayload(finish);
+  if (!finish.ok) throw new Error(apiMessage(finishResult, responseFallback(finish, "Facebook Reel publish failed.")));
+  return { status: "published", id: startResult.video_id, manageUrl: "https://business.facebook.com/latest/content", message: "Facebook accepted and published the Reel.", response: finishResult };
 }
 
 async function uploadInstagramReel(job) {
@@ -339,7 +344,25 @@ async function uploadYouTubeThumbnail(token, videoId, file) {
 }
 
 function apiMessage(value, fallback) {
-  return value?.error?.message ?? value?.error_description ?? value?.message ?? fallback;
+  const error = value?.error;
+  const message = error?.message ?? value?.error_description ?? value?.message ?? fallback;
+  const details = [];
+  if (error?.code != null) details.push(`Meta code ${error.code}`);
+  if (error?.error_subcode != null) details.push(`subcode ${error.error_subcode}`);
+  if (error?.type) details.push(error.type);
+  if (error?.fbtrace_id) details.push(`trace ${error.fbtrace_id}`);
+  return details.length ? `${message} (${details.join(" • ")})` : message;
+}
+
+async function readApiPayload(response) {
+  const text = await response.text().catch(() => "");
+  if (!text.trim()) return {};
+  try { return JSON.parse(text); } catch { return { message: text.replace(/\s+/g, " ").trim().slice(0, 500) }; }
+}
+
+function responseFallback(response, message) {
+  const status = `${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
+  return `${message} Meta returned no error message (HTTP ${status}).`;
 }
 
 function languageCode(language = "English") {

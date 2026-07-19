@@ -61,6 +61,15 @@ test("uses progress-friendly YouTube resumable chunks", () => {
   assert.throws(() => buildYouTubeUploadPlan(20_000_000, 1_000_000), /multiple of 256 KB/);
 });
 
+test("sends Meta's required local Reel upload offset header", async () => {
+  const source = await readFile(new URL("../local-service/publishers.mjs", import.meta.url), "utf8");
+  assert.match(source, /Authorization: `OAuth \$\{token\}`/);
+  assert.match(source, /offset: "0"/);
+  assert.match(source, /file_size: String\(size\)/);
+  assert.match(source, /Meta returned no error message \(HTTP/);
+  assert.match(source, /error\?\.fbtrace_id/);
+});
+
 test("blocks media that does not meet each short-video connector contract", () => {
   const base = { state: "completed", assets: { final: { file: "/tmp/final.mp4" } }, metadata: { durationSeconds: 75, resolution: "1080x1920", frameRate: 30 } };
   for (const platform of ["youtube", "tiktok", "facebook", "instagram"]) assert.equal(publishingMediaIssue(base, platform), null);
