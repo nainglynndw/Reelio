@@ -109,9 +109,11 @@ test("includes guided Facebook Page Reels setup in Settings", async () => {
   assert.match(page, /pages_read_engagement/);
   assert.match(page, /pages_manage_posts/);
   assert.match(page, /Do not mix up these IDs/);
-  assert.match(page, /me\/accounts\?fields=id,name,access_token/);
-  assert.match(page, /Do not replace.*id.*name.*access_token/);
-  assert.match(page, /Do not paste a token into the request path/);
+  assert.match(page, /me\/accounts\?fields=name,access_token,tasks/);
+  assert.match(page, /If the response says.*data: \[\]/);
+  assert.match(page, /me\/permissions/);
+  assert.doesNotMatch(page, /61592195997189/);
+  assert.doesNotMatch(page, /className="query-warning"/);
   assert.match(page, /Save & check Facebook/);
   assert.match(service, /publishing\/facebook\/status/);
   assert.match(service, /Facebook Page token verified/);
