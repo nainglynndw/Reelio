@@ -42,7 +42,7 @@ import { useEffect, useState } from "react";
 type View = "create" | "library" | "detail" | "automations" | "settings";
 type TtsEngine = "kokoro" | "gemini" | "voxcpm2";
 type PlatformPostCopy = { title: string; caption: string; description: string; tags: string[] };
-type PublishResult = { status: string; id?: string; message?: string; url?: string; manageUrl?: string; publishId?: string; postIds?: string[]; tiktokStatus?: string; progress?: number; uploadedBytes?: number; bytesUploaded?: number; bytesTotal?: number; chunksUploaded?: number; chunksTotal?: number; etaSeconds?: number; processingStartedAt?: string; privacy?: string; requestedPrivacy?: string; publicRestricted?: boolean };
+type PublishResult = { status: string; id?: string; message?: string; url?: string; manageUrl?: string; publishId?: string; postIds?: string[]; tiktokStatus?: string; progress?: number; processingProgress?: number; uploadedBytes?: number; bytesUploaded?: number; bytesTotal?: number; chunksUploaded?: number; chunksTotal?: number; etaSeconds?: number; processingStartedAt?: string; privacy?: string; requestedPrivacy?: string; publicRestricted?: boolean };
 
 const SERVICE_URL = process.env.NEXT_PUBLIC_REELIO_SERVICE_URL ?? "http://127.0.0.1:8788";
 
@@ -943,7 +943,7 @@ function VideoDetailView({ job, generationLocked, onBack, onOpenSettings, onJobC
     if (isDemo || !currentJob.assets?.final || platformIds.length === 0 || currentJob.reviewState !== "approved") return;
     setPublishResults((previous) => ({ ...previous, ...Object.fromEntries(platformIds.map((id) => {
       const checkingExisting = previous[id]?.status === "processing" && !reuploadPlatforms.includes(id);
-      return [id, { status: checkingExisting ? "verifying" : "starting", progress: checkingExisting ? 100 : 0, message: checkingExisting ? "Checking TikTok delivery status…" : reuploadPlatforms.includes(id) ? "Preparing a new upload…" : "Starting upload…", publishId: checkingExisting ? previous[id]?.publishId : undefined }];
+      return [id, { ...previous[id], status: checkingExisting ? "verifying" : "starting", progress: checkingExisting ? 100 : 0, message: checkingExisting ? `Checking ${platforms.find((platform) => platform.id === id)?.label ?? id} status…` : reuploadPlatforms.includes(id) ? "Preparing a new upload…" : "Starting upload…" }];
     })) }));
     setPublishing(true);
     try {
@@ -962,7 +962,7 @@ function VideoDetailView({ job, generationLocked, onBack, onOpenSettings, onJobC
       const delivered = attemptedResults.filter(([, item]) => ["uploaded", "published", "inbox"].includes(item.status));
       const processing = attemptedResults.filter(([, item]) => item.status === "processing");
       if (failures.length) setToast(failures.map(([id, item]) => `${platforms.find((platform) => platform.id === id)?.label ?? id}: ${item.message ?? "upload failed"}`).join(" • "));
-      else if (processing.length) setToast("The file reached TikTok and is processing. Use Check TikTok status shortly.");
+      else if (processing.length) setToast(processing.map(([id]) => `${platforms.find((platform) => platform.id === id)?.label ?? id} received the file and is processing it`).join(" • "));
       else if (delivered.length) setToast(delivered.map(([id]) => `${platforms.find((platform) => platform.id === id)?.label ?? id} ${reuploadPlatforms.includes(id) ? "re-uploaded as a new post" : "confirmed"}`).join(" • "));
     } catch (error) {
       setToast(error instanceof Error ? error.message : "Publishing could not start. Check account credentials.");
@@ -1098,8 +1098,8 @@ function VideoDetailView({ job, generationLocked, onBack, onOpenSettings, onJobC
             const successful = Boolean(result && ["uploaded", "published", "inbox"].includes(result.status));
             const active = Boolean(result && ["starting", "uploading", "verifying", "processing"].includes(result.status));
             const manageUrl = successful || result?.status === "processing" ? platformManageUrl(platform.id, result) : null;
-            const label = !result ? eligibility.eligible ? "Eligible • Not uploaded" : "Not eligible" : result.status === "failed" ? "Upload failed" : result.status === "needs_credentials" ? "Connection required" : result.status === "inbox" ? "Delivered to TikTok inbox" : result.status === "processing" ? "Uploaded • TikTok processing" : result.status === "verifying" ? "Upload complete • verifying" : result.status === "uploading" ? `Uploading ${result.progress ?? 0}%` : result.status === "starting" ? "Starting upload" : result.status === "uploaded" && result.privacy ? `Uploaded • ${result.privacy}` : result.status === "published" && result.privacy ? `Published • ${result.privacy}` : result.status;
-            const progressDetail = result?.status === "uploading" ? `${formatFileSize(result.bytesUploaded)} of ${formatFileSize(result.bytesTotal)}${result.etaSeconds ? ` • about ${formatEta(result.etaSeconds)} left` : ""}` : result?.status === "starting" ? "Preparing resumable upload…" : result?.status === "verifying" || result?.status === "processing" ? platform.id === "tiktok" ? "Waiting for TikTok • usually under 1 minute" : "Upload complete • confirming visibility" : "";
+            const label = !result ? eligibility.eligible ? "Eligible • Not uploaded" : "Not eligible" : result.status === "failed" ? "Upload failed" : result.status === "needs_credentials" ? "Connection required" : result.status === "inbox" ? "Delivered to TikTok inbox" : result.status === "processing" ? `Uploaded • ${platform.label} processing` : result.status === "verifying" ? "Upload complete • verifying" : result.status === "uploading" ? `Uploading ${result.progress ?? 0}%` : result.status === "starting" ? "Starting upload" : result.status === "uploaded" && result.privacy ? `Uploaded • ${result.privacy}` : result.status === "published" && result.privacy ? `Published • ${result.privacy}` : result.status;
+            const progressDetail = result?.status === "uploading" ? `${formatFileSize(result.bytesUploaded)} of ${formatFileSize(result.bytesTotal)}${result.etaSeconds ? ` • about ${formatEta(result.etaSeconds)} left` : ""}` : result?.status === "starting" ? "Preparing upload…" : result?.status === "verifying" ? `Checking ${platform.label} status…` : result?.status === "processing" ? platform.id === "tiktok" ? "Waiting for TikTok • usually under 1 minute" : platform.id === "facebook" ? `${result.message ?? "Facebook is processing the Reel…"}` : "Upload complete • platform processing" : "";
             return <article className={`publish-platform-option ${checked ? "selected" : ""} ${eligibility.eligible ? "eligible" : "ineligible"}`} key={platform.id}>
               <button className={`platform-select-button ${checked ? "selected" : ""} ${result?.status ?? ""}`} disabled={!eligibility.eligible || publishing || (platform.id === "tiktok" && checkingTikTokStatus)} onClick={() => togglePublishPlatform(platform.id)}>
                 <PlatformLogo platform={platform} /><span><strong>{platform.label}</strong><small>{label}</small></span><i aria-label={checked ? "Selected for upload" : "Not selected"}>{checked && <Check size={13} />}</i>
@@ -1114,7 +1114,7 @@ function VideoDetailView({ job, generationLocked, onBack, onOpenSettings, onJobC
             </article>;
           })}</div>
           {publishResults.youtube?.publicRestricted && publishResults.youtube.id && <div className="youtube-visibility-action"><span><CircleHelp size={13} /> This YouTube upload is private</span><a href={`https://studio.youtube.com/video/${publishResults.youtube.id}/edit`} target="_blank" rel="noreferrer">Make public in YouTube Studio <ChevronRight size={12} /></a></div>}
-          <button className="publish-all-button" onClick={publish} disabled={publishing || checkingTikTokStatus || isDemo || !currentJob.assets?.final || publishSelection.length === 0 || currentJob.reviewState !== "approved"}><CloudUpload size={17} /> {publishing ? "Uploading and verifying…" : checkingTikTokStatus ? "Checking TikTok status…" : publishSelection.length === 1 && publishSelection[0] === "tiktok" && publishResults.tiktok?.status === "processing" ? "Check TikTok status" : currentJob.reviewState !== "approved" && !isDemo ? "Approve before uploading" : `Upload to ${publishSelection.length} selected platform${publishSelection.length === 1 ? "" : "s"}`}</button>
+          <button className="publish-all-button" onClick={publish} disabled={publishing || checkingTikTokStatus || isDemo || !currentJob.assets?.final || publishSelection.length === 0 || currentJob.reviewState !== "approved"}><CloudUpload size={17} /> {publishing ? "Uploading and verifying…" : checkingTikTokStatus ? "Checking TikTok status…" : publishSelection.length === 1 && publishResults[publishSelection[0]]?.status === "processing" ? `Check ${platforms.find((platform) => platform.id === publishSelection[0])?.label ?? "platform"} status` : currentJob.reviewState !== "approved" && !isDemo ? "Approve before uploading" : `Upload to ${publishSelection.length} selected platform${publishSelection.length === 1 ? "" : "s"}`}</button>
           {isDemo && <p className="publish-note">Generate a real video package before publishing.</p>}
         </div>}
       </section>
@@ -1131,7 +1131,7 @@ function PlatformCopyCard({ platform, copy, onCopy }: { platform: Platform; copy
 }
 
 function formatFileSize(bytes?: number) {
-  if (!bytes || bytes < 0) return "—";
+  if (bytes == null || !Number.isFinite(bytes) || bytes < 0) return "—";
   return bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)} MB` : `${Math.ceil(bytes / 1000)} KB`;
 }
 

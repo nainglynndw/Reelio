@@ -13,7 +13,7 @@ export async function publishJob(job, platformIds, onProgress = async () => {}, 
       await onProgress(platformId, { status: "starting", progress: 0, message: `Starting ${platformId} upload…` });
       if (platformId === "youtube") results.youtube = await uploadYouTube(job, (result) => onProgress(platformId, result), reuploadPlatforms.has(platformId));
       else if (platformId === "tiktok") results.tiktok = await uploadTikTokInbox(job, (result) => onProgress(platformId, result), reuploadPlatforms.has(platformId));
-      else if (platformId === "facebook") results.facebook = await uploadFacebookReel(job, (result) => onProgress(platformId, result));
+      else if (platformId === "facebook") results.facebook = await uploadFacebookReel(job, (result) => onProgress(platformId, result), reuploadPlatforms.has(platformId));
       else if (platformId === "instagram") results.instagram = await uploadInstagramReel(job);
       else results[platformId] = { status: "unsupported", message: "No connector is registered for this platform." };
     } catch (error) {
@@ -248,11 +248,15 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function uploadFacebookReel(job, onProgress = async () => {}) {
+async function uploadFacebookReel(job, onProgress = async () => {}, forceReupload = false) {
   const pageId = process.env.FACEBOOK_PAGE_ID;
   const token = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
   const version = process.env.META_GRAPH_VERSION;
   if (!pageId || !token || !version) return needsCredentials("Set FACEBOOK_PAGE_ID, FACEBOOK_PAGE_ACCESS_TOKEN, and META_GRAPH_VERSION.");
+  const previous = job.publishResults?.facebook;
+  if (!forceReupload && previous?.id && previous.status === "processing") {
+    return waitForFacebookReel(version, previous.id, token, onProgress);
+  }
   const pageCheck = await fetchWithTimeout(`https://graph.facebook.com/${version}/me?fields=id,name`, { headers: { Authorization: `Bearer ${token}` } }, 20_000);
   const page = await pageCheck.json().catch(() => ({}));
   if (!pageCheck.ok) throw new Error(apiMessage(page, "Facebook Page token verification failed."));
@@ -264,11 +268,11 @@ async function uploadFacebookReel(job, onProgress = async () => {}) {
   if (!start.ok) throw new Error(apiMessage(startResult, responseFallback(start, "Facebook Reel initialization failed.")));
   if (!startResult.upload_url || !startResult.video_id) throw new Error("Facebook created an incomplete Reel upload session. Retry the upload.");
   const size = (await stat(job.assets.final.file)).size;
-  await onProgress({ status: "uploading", progress: 10, bytesUploaded: 0, bytesTotal: size, message: "Uploading the video file to Facebook…" });
+  await onProgress({ status: "uploading", progress: 0, bytesUploaded: 0, bytesTotal: size, message: "Uploading the video file to Facebook…" });
   const upload = await fetchWithTimeout(startResult.upload_url, {
     method: "POST",
     headers: { Authorization: `OAuth ${token}`, "Content-Type": "application/octet-stream", offset: "0", file_size: String(size), "Content-Length": String(size) },
-    body: createReadStream(job.assets.final.file),
+    body: facebookUploadBody(job.assets.final.file, size, onProgress),
     duplex: "half",
   }, 300_000);
   const uploadResult = await readApiPayload(upload);
@@ -280,7 +284,50 @@ async function uploadFacebookReel(job, onProgress = async () => {}) {
   const finish = await fetchWithTimeout(`${base}?${finishParams}`, { method: "POST" });
   const finishResult = await readApiPayload(finish);
   if (!finish.ok) throw new Error(apiMessage(finishResult, responseFallback(finish, "Facebook Reel publish failed.")));
-  return { status: "published", id: startResult.video_id, manageUrl: "https://business.facebook.com/latest/content", message: "Facebook accepted and published the Reel.", response: finishResult };
+  return waitForFacebookReel(version, startResult.video_id, token, onProgress);
+}
+
+async function* facebookUploadBody(file, size, onProgress) {
+  let bytesUploaded = 0;
+  let lastReportedAt = 0;
+  const startedAt = Date.now();
+  for await (const chunk of createReadStream(file)) {
+    bytesUploaded += chunk.length;
+    const now = Date.now();
+    if (bytesUploaded === size || now - lastReportedAt >= 250) {
+      lastReportedAt = now;
+      const progress = Math.min(99, Math.round((bytesUploaded / size) * 100));
+      const elapsedSeconds = Math.max((now - startedAt) / 1000, 0.1);
+      const bytesPerSecond = bytesUploaded / elapsedSeconds;
+      const etaSeconds = Math.max(0, Math.ceil((size - bytesUploaded) / bytesPerSecond));
+      await onProgress({ status: "uploading", progress, bytesUploaded, bytesTotal: size, etaSeconds, message: "Uploading the video file to Facebook…" });
+    }
+    yield chunk;
+  }
+}
+
+async function waitForFacebookReel(version, videoId, token, onProgress) {
+  const deadline = Date.now() + 120_000;
+  let latest = {};
+  while (Date.now() < deadline) {
+    const params = new URLSearchParams({ fields: "status", access_token: token });
+    const response = await fetchWithTimeout(`https://graph.facebook.com/${version}/${videoId}?${params}`, {}, 20_000);
+    latest = await readApiPayload(response);
+    if (!response.ok) throw new Error(apiMessage(latest, responseFallback(response, "Facebook Reel status check failed.")));
+    const status = latest.status ?? {};
+    const videoStatus = String(status.video_status ?? "processing").toLowerCase();
+    const processingStatus = String(status.processing_phase?.status ?? "").toLowerCase();
+    const publishingStatus = String(status.publishing_phase?.status ?? "").toLowerCase();
+    const failed = [videoStatus, processingStatus, publishingStatus].some((value) => ["error", "failed", "expired"].includes(value));
+    if (failed) throw new Error(status.processing_phase?.error?.message ?? status.publishing_phase?.error?.message ?? `Facebook could not process the Reel (${videoStatus}).`);
+    const processingProgress = Number(status.processing_progress ?? 0);
+    await onProgress({ status: "processing", progress: 100, id: videoId, processingProgress, manageUrl: "https://business.facebook.com/latest/content", message: `Facebook is processing the Reel${processingProgress ? ` • ${processingProgress}%` : ""}…` });
+    if (publishingStatus === "complete" || ["published", "ready"].includes(videoStatus)) {
+      return { status: "published", id: videoId, manageUrl: "https://business.facebook.com/latest/content", message: "Facebook confirms the Reel is published.", response: latest };
+    }
+    await delay(3_000);
+  }
+  return { status: "processing", progress: 100, id: videoId, manageUrl: "https://business.facebook.com/latest/content", message: "The upload is complete. Facebook is still processing the Reel; use Check Facebook status shortly.", response: latest };
 }
 
 async function uploadInstagramReel(job) {

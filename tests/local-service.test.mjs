@@ -68,6 +68,9 @@ test("sends Meta's required local Reel upload offset header", async () => {
   assert.match(source, /file_size: String\(size\)/);
   assert.match(source, /Meta returned no error message \(HTTP/);
   assert.match(source, /error\?\.fbtrace_id/);
+  assert.match(source, /facebookUploadBody\(job\.assets\.final\.file, size, onProgress\)/);
+  assert.match(source, /fields: "status"/);
+  assert.match(source, /Facebook is still processing the Reel/);
 });
 
 test("blocks media that does not meet each short-video connector contract", () => {
