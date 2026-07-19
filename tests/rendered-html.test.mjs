@@ -108,6 +108,7 @@ test("includes guided Facebook Page Reels setup in Settings", async () => {
   assert.match(page, /pages_show_list/);
   assert.match(page, /pages_read_engagement/);
   assert.match(page, /pages_manage_posts/);
+  assert.match(page, /business_management/);
   assert.match(page, /Do not mix up these IDs/);
   assert.match(page, /me\/accounts\?fields=name,access_token,tasks/);
   assert.match(page, /If the response says.*data: \[\]/);
