@@ -1,0 +1,60 @@
+{
+  "name": "reelio-local-studio",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "concurrently --kill-others --names web,worker --prefix-colors blue,magenta \"npm:dev:web\" \"npm:service\"",
+    "dev:web": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev",
+    "service": "node local-service/server.mjs",
+    "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
+    "start:web": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start --hostname 127.0.0.1",
+    "start": "NODE_ENV=production concurrently --kill-others --names web,worker \"npm:start:web\" \"npm:service\"",
+    "production": "npm run preflight && npm run build && npm run start",
+    "preflight": "node scripts/preflight.mjs",
+    "healthcheck": "node scripts/healthcheck.mjs",
+    "kokoro:setup": "node scripts/setup-kokoro.mjs",
+    "voxcpm2:setup": "node scripts/setup-voxcpm2.mjs",
+    "check": "npm run lint && npm test",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .reelio",
+    "db:generate": "drizzle-kit generate"
+  },
+  "dependencies": {
+    "@google/genai": "^2.12.0",
+    "dotenv": "^17.4.2",
+    "drizzle-orm": "0.45.2",
+    "ffmpeg-static": "^5.3.0",
+    "ffprobe-static": "^3.1.0",
+    "lucide-react": "^1.25.0",
+    "next": "16.2.10",
+    "node-cron": "^4.6.0",
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.45.1",
+    "@tailwindcss/postcss": "4.2.1",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "@vitejs/plugin-rsc": "0.5.26",
+    "concurrently": "^10.0.3",
+    "drizzle-kit": "0.31.10",
+    "eslint": "9.39.4",
+    "eslint-config-next": "16.2.6",
+    "react-server-dom-webpack": "19.2.6",
+    "tailwindcss": "4.2.1",
+    "typescript": "5.9.3",
+    "vinext": "0.0.50",
+    "vite": "8.1.5",
+    "wrangler": "4.112.0"
+  },
+  "overrides": {
+    "postcss": "8.5.19"
+  },
+  "type": "module"
+}
