@@ -14,9 +14,23 @@ export function kokoroConfig() {
     modelPath: path.resolve(process.env.KOKORO_MODEL_PATH || path.join(base, "models", "kokoro-v1.0.onnx")),
     voicesPath: path.resolve(process.env.KOKORO_VOICES_PATH || path.join(base, "models", "voices-v1.0.bin")),
     voice: process.env.KOKORO_VOICE || "af_heart",
+    voiceBlend: parseVoiceBlend(process.env.KOKORO_VOICE_BLEND),
     speed: Number(process.env.KOKORO_SPEED || 1.15),
     language: "en-us",
   };
+}
+
+// Optional brand voice: KOKORO_VOICE_BLEND="af_heart:0.6,af_bella:0.4" mixes voice style vectors into
+// one distinctive, consistent voiceprint. Returns null (single voice) when unset or malformed.
+export function parseVoiceBlend(raw) {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const entries = raw.split(",").map((part) => {
+    const [name, weight] = part.split(":").map((value) => value.trim());
+    return { name, weight: Number(weight ?? "1") };
+  }).filter((entry) => entry.name && Number.isFinite(entry.weight) && entry.weight > 0);
+  if (entries.length < 2) return null;
+  const total = entries.reduce((sum, entry) => sum + entry.weight, 0);
+  return entries.map((entry) => ({ name: entry.name, weight: Number((entry.weight / total).toFixed(4)) }));
 }
 
 export async function getKokoroHealth() {
@@ -36,7 +50,7 @@ export async function getKokoroHealth() {
   };
 }
 
-export async function synthesizeKokoroCues({ segments, outputDir }) {
+export async function synthesizeKokoroCues({ segments, outputDir, speed }) {
   const config = kokoroConfig();
   const health = await getKokoroHealth();
   if (!health.ready) throw new Error(health.error);
@@ -45,12 +59,15 @@ export async function synthesizeKokoroCues({ segments, outputDir }) {
     text,
     output: path.join(outputDir, `cue-${String(index + 1).padStart(3, "0")}.wav`),
   }));
+  // A per-topic speed override lets calmer topics slow down and energetic ones speed up.
+  const pacedSpeed = Number.isFinite(speed) ? Math.max(0.8, Math.min(1.4, Number(speed))) : config.speed;
   const manifestPath = path.join(outputDir, "kokoro-manifest.json");
   await writeFile(manifestPath, JSON.stringify({
     model: config.modelPath,
     voices: config.voicesPath,
     voice: config.voice,
-    speed: config.speed,
+    voiceBlend: config.voiceBlend,
+    speed: pacedSpeed,
     language: config.language,
     cues,
   }), "utf8");

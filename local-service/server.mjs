@@ -1,7 +1,8 @@
 import { config as loadEnv } from "dotenv";
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
 import { access, rm, stat } from "node:fs/promises";
 import http from "node:http";
+import https from "node:https";
 import path from "node:path";
 import cron from "node-cron";
 import { allowedOrigin, HttpError, parseByteRange, readJsonBody } from "./http-utils.mjs";
@@ -25,13 +26,16 @@ import { getKokoroHealth } from "./kokoro-client.mjs";
 import { getGeminiTtsHealth } from "./gemini-tts-client.mjs";
 import { getVoxCpmHealth } from "./voxcpm-client.mjs";
 import { generateGroundedText, generateText, textProviderConfig, validateGeminiApiKey } from "./text-provider.mjs";
-import { saveLocalSettings } from "./settings-store.mjs";
+import { saveLocalSettings, secretsFilePath } from "./settings-store.mjs";
 import { IDEA_SYSTEM_PROMPT, NEWS_RESEARCH_SYSTEM_PROMPT, NEWS_SYSTEM_PROMPT, normalizeIdeaOutput, studioIdea } from "./idea-generator.mjs";
 import { assertJobActive, JobStoppedError, runWithJobControl, stopAllJobExecutions, stopJobExecution } from "./job-control.mjs";
 import { finishYouTubeOAuth, startYouTubeOAuth, youtubeConnectionStatus, YouTubeOAuthError, youtubeOAuthConfig } from "./youtube-oauth.mjs";
 import { finishTikTokOAuth, startTikTokOAuth, tiktokConnectionStatus, TikTokOAuthError, tiktokOAuthConfig } from "./tiktok-oauth.mjs";
+import { facebookConnectionStatus, facebookOAuthConfig, FacebookOAuthError, finishFacebookOAuth, selectFacebookPage, startFacebookOAuth } from "./facebook-oauth.mjs";
 
-loadEnv({ path: [".env.local", ".env"], quiet: true });
+// Load the worker-owned secrets file first (highest precedence), then the static .env files.
+// Runtime OAuth/settings writes go to the secrets file so the web dev server never restarts on them.
+loadEnv({ path: [secretsFilePath(), ".env.local", ".env"], quiet: true });
 
 const port = Number(process.env.REELIO_SERVICE_PORT ?? 8788);
 const maxBodyBytes = Number(process.env.REELIO_MAX_BODY_BYTES ?? 65_536);
@@ -47,7 +51,7 @@ queue.push(...store.recoveredJobIds);
 for (const automation of listAutomations()) registerSchedule(automation);
 if (queue.length) void workQueue();
 
-const server = http.createServer(async (request, response) => {
+const requestHandler = async (request, response) => {
   const requestOrigin = request.headers.origin;
   setResponseHeaders(response, requestOrigin);
   if (!allowedOrigin(requestOrigin, allowedOrigins)) return json(response, 403, { error: "Origin is not allowed." });
@@ -57,9 +61,7 @@ const server = http.createServer(async (request, response) => {
   try {
     if (shuttingDown && request.method !== "GET") return json(response, 503, { error: "The local worker is shutting down." });
     if (request.method === "GET" && url.pathname === "/health") {
-      const gemini = await validateGeminiApiKey();
-      const tts = await getKokoroHealth();
-      const voxcpm2 = await getVoxCpmHealth();
+      const [gemini, tts, voxcpm2] = await Promise.all([validateGeminiApiKey(), getKokoroHealth(), getVoxCpmHealth()]);
       const geminiTts = getGeminiTtsHealth();
       const text = { ...textProviderConfig(), googleReady: gemini.ready };
       return json(response, 200, {
@@ -98,13 +100,34 @@ const server = http.createServer(async (request, response) => {
         accounts: {
           youtube: { ready: youtube.connected, setupComplete: youtube.configured && youtube.hasAuthorization, accountName: youtube.channelTitle, reason: youtube.connected ? "YouTube channel connected." : youtube.message ?? "Connect a YouTube channel in Settings." },
           tiktok: { ready: tiktok.connected && tiktok.uploadReady !== false, setupComplete: tiktok.configured && tiktok.hasAuthorization, accountName: tiktok.displayName, reason: tiktok.connected && tiktok.uploadReady !== false ? "TikTok draft upload access is ready." : tiktok.message ?? "Connect TikTok with video.upload permission in Settings." },
-          facebook: { ready: facebook.connected, setupComplete: facebook.configured, accountName: facebook.pageName, reason: facebook.connected ? "Facebook Page token verified." : facebook.message },
+          facebook: { ready: facebook.connected, setupComplete: facebook.configured && facebook.hasAuthorization, accountName: facebook.pageName, reason: facebook.connected ? "Facebook Page token verified." : facebook.message },
           instagram: { ready: instagram.connected, setupComplete: instagram.configured, accountName: instagram.username, reason: instagram.connected ? "Instagram Professional account verified." : instagram.message },
         },
       });
     }
     if (request.method === "GET" && url.pathname === "/publishing/facebook/status") {
-      return json(response, 200, await facebookConnectionStatus());
+      return json(response, 200, { ...(await facebookConnectionStatus()), redirectUri: facebookOAuthConfig().redirectUri });
+    }
+    if (request.method === "POST" && url.pathname === "/oauth/facebook/start") {
+      return json(response, 200, startFacebookOAuth());
+    }
+    if (request.method === "POST" && url.pathname === "/oauth/facebook/select-page") {
+      const body = await readJsonBody(request, maxBodyBytes);
+      const pageId = cleanText(body.pageId, "Facebook Page ID", 1, 64);
+      return json(response, 200, await selectFacebookPage(pageId));
+    }
+    if (request.method === "GET" && url.pathname === "/oauth/facebook/callback") {
+      const oauthError = url.searchParams.get("error");
+      const oauthDescription = url.searchParams.get("error_description");
+      if (oauthError) return html(response, 400, oauthCallbackPage("Facebook", false, oauthDescription || (oauthError === "access_denied" ? "You cancelled Facebook access." : `Facebook returned: ${oauthError}`), "#4b8cff"));
+      try {
+        const status = await finishFacebookOAuth(url.searchParams.get("code"), url.searchParams.get("state"));
+        const message = status.connected ? `${status.pageName ?? "Facebook Page"} is connected.` : status.message ?? "Facebook is connected. Choose a Page in Settings.";
+        return html(response, 200, oauthCallbackPage("Facebook", true, message, "#4b8cff"));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Facebook connection failed.";
+        return html(response, error instanceof FacebookOAuthError ? error.status : 500, oauthCallbackPage("Facebook", false, message, "#4b8cff"));
+      }
     }
     if (request.method === "GET" && url.pathname === "/publishing/instagram/status") {
       return json(response, 200, await instagramConnectionStatus());
@@ -155,10 +178,13 @@ const server = http.createServer(async (request, response) => {
       const language = cleanText(body.language ?? "English", "Language", 1, 80);
       const category = cleanText(body.category ?? "Curious knowledge", "Category", 1, 100);
       const duration = cleanText(body.duration ?? "60–90 sec", "Duration", 1, 40);
+      const focus = typeof body.focus === "string" && body.focus.trim() ? cleanText(body.focus, "Topic focus", 1, 300) : "";
       const generated = await generateText({
         system: IDEA_SYSTEM_PROMPT,
-        user: `Suggest one fact-safe subject for category "${category}" and a ${duration} knowledge video. Write the idea value in ${language}.`,
-        maxTokens: 160,
+        user: focus
+          ? `Suggest a fact-safe, specific ${duration} knowledge-video brief about "${focus}". Keep it in the "${category}" style. Write it in ${language}.`
+          : `Suggest a fact-safe ${duration} knowledge-video brief for the "${category}" category. Write it in ${language}.`,
+        maxTokens: 600,
         temperature: 0.65,
       });
       if (!generated && language.toLowerCase() !== "english") throw new ValidationError(`Add a Gemini API key in Settings to generate ${language} ideas.`);
@@ -173,10 +199,13 @@ const server = http.createServer(async (request, response) => {
       const language = cleanText(body.language ?? "English", "Language", 1, 80);
       const category = cleanText(body.category ?? "Curious knowledge", "Category", 1, 100);
       const duration = cleanText(body.duration ?? "60–90 sec", "Duration", 1, 40);
+      const focus = typeof body.focus === "string" && body.focus.trim() ? cleanText(body.focus, "Topic focus", 1, 300) : "";
       const today = new Date().toISOString().slice(0, 10);
       const research = await generateGroundedText({
         system: NEWS_RESEARCH_SYSTEM_PROMPT,
-        user: `Today is ${today}. Research current ${category} news now for a factual knowledge video.`,
+        user: focus
+          ? `Today is ${today}. Research the latest verifiable news about "${focus}" (within ${category}) for a factual knowledge video.`
+          : `Today is ${today}. Research current ${category} news now for a factual knowledge video.`,
         maxTokens: 650,
         temperature: 0.2,
         recentDays: 7,
@@ -185,8 +214,8 @@ const server = http.createServer(async (request, response) => {
       if (!research.sources?.length) throw new ValidationError("No verified recent story was found. Try again.", 502);
       const generated = await generateText({
         system: NEWS_SYSTEM_PROMPT,
-        user: `Today is ${today}. Create one ${duration} idea in ${language} using only this source-grounded research:\n\n${research.text}`,
-        maxTokens: 220,
+        user: `Today is ${today}. Create one ${duration} brief in ${language} using only this source-grounded research:\n\n${research.text}`,
+        maxTokens: 600,
         temperature: 0.25,
       });
       const idea = normalizeIdeaOutput(generated?.text);
@@ -356,13 +385,14 @@ const server = http.createServer(async (request, response) => {
     }
     return json(response, 404, { error: "Route not found." });
   } catch (error) {
-    const status = error instanceof ValidationError || error instanceof HttpError || error instanceof YouTubeOAuthError || error instanceof TikTokOAuthError ? error.status : 500;
+    const status = error instanceof ValidationError || error instanceof HttpError || error instanceof YouTubeOAuthError || error instanceof TikTokOAuthError || error instanceof FacebookOAuthError ? error.status : 500;
     const message = status >= 500 ? "The local worker could not complete this request." : error.message;
     if (status >= 500) process.stderr.write(`[reelio] ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
     return json(response, status, { error: message });
   }
-});
+};
 
+const server = http.createServer(requestHandler);
 server.requestTimeout = 30_000;
 server.headersTimeout = 10_000;
 server.keepAliveTimeout = 5_000;
@@ -372,6 +402,28 @@ server.listen(port, "127.0.0.1", () => {
   const actualPort = typeof address === "object" && address ? address.port : port;
   process.stdout.write(`Reelio local worker: http://127.0.0.1:${actualPort}\n`);
 });
+
+const httpsServer = startHttpsListener();
+
+function startHttpsListener() {
+  const certFile = process.env.REELIO_HTTPS_CERT?.trim() || path.join(getRoot(), "certs", "localhost.pem");
+  const keyFile = process.env.REELIO_HTTPS_KEY?.trim() || path.join(getRoot(), "certs", "localhost-key.pem");
+  let credentials;
+  try {
+    credentials = { cert: readFileSync(certFile), key: readFileSync(keyFile) };
+  } catch {
+    process.stdout.write("Reelio HTTPS listener disabled (no certificate). Run npm run https:setup to enable Meta OAuth.\n");
+    return null;
+  }
+  const httpsPort = Number(process.env.REELIO_HTTPS_PORT ?? 8789);
+  const secure = https.createServer(credentials, requestHandler);
+  secure.requestTimeout = 30_000;
+  secure.headersTimeout = 10_000;
+  secure.keepAliveTimeout = 5_000;
+  secure.on("error", (error) => process.stderr.write(`[reelio] HTTPS listener error: ${error instanceof Error ? error.message : String(error)}\n`));
+  secure.listen(httpsPort, "127.0.0.1", () => process.stdout.write(`Reelio HTTPS worker: https://localhost:${httpsPort}\n`));
+  return secure;
+}
 
 async function enqueue(request, trigger) {
   if (trigger?.type === "manual" && listJobs().some((job) => job.state === "running" || job.state === "queued")) {
@@ -480,29 +532,6 @@ function end(response, status) {
   response.end();
 }
 
-async function facebookConnectionStatus() {
-  const pageId = process.env.FACEBOOK_PAGE_ID?.trim();
-  const token = process.env.FACEBOOK_PAGE_ACCESS_TOKEN?.trim();
-  const graphVersion = process.env.META_GRAPH_VERSION?.trim();
-  const configured = Boolean(pageId && token && graphVersion);
-  if (!configured) return { connected: false, configured: false, pageId: pageId || null, graphVersion: graphVersion || null, message: "Add a Facebook Page ID, Page access token, and Graph API version." };
-  if (!/^v\d+\.\d+$/.test(graphVersion)) return { connected: false, configured: true, pageId, graphVersion, message: "Graph API version must look like v23.0." };
-  try {
-    const fields = new URLSearchParams({ fields: "id,name" });
-    const response = await fetch(`https://graph.facebook.com/${graphVersion}/me?${fields}`, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(15_000),
-    });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) return { connected: false, configured: true, pageId, graphVersion, message: result?.error?.message ?? "Meta rejected the Facebook Page credentials." };
-    if (String(result.id) !== pageId) return { connected: false, configured: true, pageId, graphVersion, message: "The saved token does not belong to this Facebook Page ID. Copy the Page id and access_token from the same GET /me/accounts entry." };
-    return { connected: true, configured: true, pageId, pageName: result.name ?? "Facebook Page", graphVersion, message: "Facebook Page token verified." };
-  } catch (error) {
-    const timedOut = error?.name === "TimeoutError" || error?.name === "AbortError";
-    return { connected: false, configured: true, pageId, graphVersion, message: timedOut ? "Facebook connection check timed out. Try again." : "Facebook connection could not be checked." };
-  }
-}
-
 async function instagramConnectionStatus() {
   const accountId = process.env.INSTAGRAM_ACCOUNT_ID?.trim();
   const token = process.env.META_USER_ACCESS_TOKEN?.trim();
@@ -552,6 +581,7 @@ async function shutdown(signal) {
   process.stdout.write(`[reelio] ${signal}: finishing shutdown\n`);
   for (const schedule of schedules.values()) schedule.stop();
   stopAllJobExecutions();
+  httpsServer?.close();
   server.close(() => process.exit(0));
   const timeout = Number(process.env.REELIO_SHUTDOWN_TIMEOUT_MS ?? 10_000);
   setTimeout(() => process.exit(1), timeout).unref();

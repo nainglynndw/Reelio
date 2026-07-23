@@ -50,7 +50,7 @@ export async function getVoxCpmHealth() {
   };
 }
 
-export async function synthesizeVoxCpmCues({ segments, language, outputDir }) {
+export async function synthesizeVoxCpmCues({ segments, language, outputDir, voiceDescription }) {
   const config = voxCpmConfig();
   const health = await getVoxCpmHealth();
   if (!health.ready) throw new Error(health.error);
@@ -60,6 +60,8 @@ export async function synthesizeVoxCpmCues({ segments, language, outputDir }) {
     text,
     output: path.join(outputDir, `cue-${String(index + 1).padStart(3, "0")}.wav`),
   }));
+  // A per-topic voice description steers VoxCPM2's tone (calm, energetic, cinematic, …).
+  const description = typeof voiceDescription === "string" && voiceDescription.trim() ? voiceDescription.trim() : config.voiceDescription;
   const manifestPath = path.join(outputDir, "voxcpm2-manifest.json");
   await writeFile(manifestPath, JSON.stringify({
     model: config.modelPath,
@@ -67,7 +69,7 @@ export async function synthesizeVoxCpmCues({ segments, language, outputDir }) {
     cfgValue: config.cfgValue,
     inferenceTimesteps: config.inferenceTimesteps,
     seed: config.seed,
-    voiceDescription: config.voiceDescription,
+    voiceDescription: description,
     language,
     cues,
   }), "utf8");

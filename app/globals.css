@@ -82,6 +82,18 @@ button { cursor: pointer; }
 .prompt-box textarea { display: block; width: 100%; min-height: 122px; resize: vertical; border: 0; outline: 0; padding: 15px 16px; color: #252331; font-size: 13px; line-height: 1.6; }
 .prompt-box textarea::placeholder { color: #aaa6b5; }
 .prompt-footer { height: 45px; border-top: 1px solid #eeeaf3; padding: 0 8px 0 15px; display: flex; align-items: center; justify-content: space-between; background: #fcfbfe; }
+.idea-helper { margin-top: 14px; border: 1px solid #e7e2ee; border-radius: 12px; background: #faf9fd; padding: 12px 14px; }
+.idea-helper-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.idea-helper-head svg { color: var(--purple); flex: none; }
+.idea-helper-head strong { font-size: 12px; color: #3e3946; font-weight: 800; }
+.idea-helper-head small { font-size: 10px; color: #8b8695; }
+.idea-helper-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.idea-helper-input { flex: 1; min-width: 190px; display: flex; align-items: center; gap: 8px; border: 1px solid #e1dde7; border-radius: 9px; background: #fff; padding: 0 12px; height: 40px; }
+.idea-helper-input:focus-within { border-color: #9b82f3; box-shadow: 0 0 0 3px #6f4bf313; }
+.idea-helper-input svg { color: var(--purple); flex: none; }
+.idea-helper-input input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: #252331; font-size: 12px; }
+.idea-helper-input input::placeholder { color: #aaa6b5; }
+.idea-helper .idea-actions { flex: none; }
 .prompt-footer > span { font-size: 9px; color: #a8a4b2; }
 .idea-actions { display: flex; align-items: center; gap: 7px; }
 .ai-suggest-button { position: relative; border: 1px solid #d8cff9; color: #5736ce; background: linear-gradient(110deg, #f4f0ff, #fff, #eee8ff); background-size: 220% 100%; border-radius: 8px; height: 32px; padding: 0 8px 0 10px; display: flex; align-items: center; gap: 7px; font-size: 10px; font-weight: 800; box-shadow: 0 4px 12px #6f4bf312; animation: ideaGlow 5s ease infinite; }

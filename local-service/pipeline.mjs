@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { mkdir, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import ffmpegPath from "ffmpeg-static";
 import ffprobe from "ffprobe-static";
@@ -20,12 +21,14 @@ export async function renderJob(job, progress) {
   const outputDir = path.join(getRoot(), "generated", job.id);
   const clipsDir = path.join(outputDir, "clips");
   await mkdir(clipsDir, { recursive: true });
+  const profile = styleProfile(job.request.category);
 
   await progress("script", 12, "Writing a retention-first script");
   const canonicalScript = await createScript(job.request);
   const masterScriptPath = path.join(outputDir, "master-script-english.txt");
-  await writeFile(masterScriptPath, `${canonicalScript.trim()}\n`, "utf8");
-  const canonicalSegments = segmentText(canonicalScript, "English");
+  await writeFile(masterScriptPath, `${stripMarkers(canonicalScript)}\n`, "utf8");
+  // Pull [pause]/ellipsis markers out into per-segment silence, and use the cleaned segments everywhere.
+  const { segments: canonicalSegments, pauses } = extractPauses(segmentText(canonicalScript, "English"));
   const translatedSpeechSegments = job.request.language.toLowerCase() === "english"
     ? canonicalSegments
     : await translateSegments(canonicalSegments, "English", job.request.language, "spoken narration transcript");
@@ -37,7 +40,7 @@ export async function renderJob(job, progress) {
 
   const ttsEngine = job.request.ttsEngine ?? defaultTtsEngine(job.request.language);
   await progress("voice", 26, narrationProgressMessage(job.request.language, ttsEngine));
-  const narration = await createNarration(transcriptSegments, job.request.language, ttsEngine, outputDir);
+  const narration = await createNarration(transcriptSegments, job.request.language, ttsEngine, outputDir, profile, pauses);
   const targetDuration = chooseDuration(job.request.duration, narration.duration, job.request.language);
   const fittedNarration = await fitNarration(narration, targetDuration, outputDir, job.request.language);
 
@@ -51,41 +54,45 @@ export async function renderJob(job, progress) {
   const captionsPath = path.join(outputDir, "captions.srt");
   const styledCaptionsPath = path.join(outputDir, "captions.ass");
   await writeFile(captionsPath, buildSrtFromCues(subtitleSegments, fittedNarration.cues, targetDuration), "utf8");
-  await writeFile(styledCaptionsPath, buildAss(subtitleSegments, fittedNarration.cues, targetDuration, captionFont(job.request.subtitleLanguage)), "utf8");
+  await writeFile(styledCaptionsPath, buildAss(subtitleSegments, fittedNarration.cues, targetDuration, captionFont(job.request.subtitleLanguage), profile.subtitle), "utf8");
 
   await progress("music", 35, "Composing the curated intro, background, and ending mix");
-  const music = await createCuratedMusic(targetDuration, job.request.category, outputDir);
+  // Music and platform copy are independent of the visuals; render them while clips download and encode.
+  const musicPromise = createCuratedMusic(targetDuration, job.request.category, outputDir);
+  musicPromise.catch(() => {});
+  const platformCopyPromise = createPlatformCopy(job.request, canonicalScript);
+  platformCopyPromise.catch(() => {});
 
   await progress("stock-search", 39, "Finding and preparing visual clips");
-  const clipDuration = 3.2;
-  const clipCount = Math.ceil(targetDuration / clipDuration);
-  const visualQueries = await createVisualQueries(canonicalScript, job.request.category);
-  const stock = await findStockClips(job.request, clipCount, clipsDir, visualQueries, progress);
-  const normalizedClips = [];
-  const licenses = [];
-
-  for (let index = 0; index < clipCount; index += 1) {
+  const clipDuration = profile.clipSeconds;
+  const transitionSeconds = profile.transitionSeconds;
+  const clipCount = Math.max(1, Math.ceil((targetDuration - transitionSeconds) / (clipDuration - transitionSeconds)));
+  const segmentQueries = await createSegmentQueries(canonicalSegments, job.request.category);
+  const clipPlan = planClipQueries(clipCount, clipDuration, transitionSeconds, fittedNarration.cues, segmentQueries);
+  const stock = await findStockClips(job.request, clipPlan, clipsDir, progress);
+  let preparedCount = 0;
+  const prepared = await mapWithConcurrency(Array.from({ length: clipCount }, (_, index) => index), clipEncodeConcurrency(), async (index) => {
     const output = path.join(clipsDir, `clip-${String(index + 1).padStart(2, "0")}.mp4`);
-    const source = stock[index % Math.max(stock.length, 1)];
-    if (source) {
-      await normalizeStockClip(source.file, output, clipDuration);
-      licenses.push(source.license);
-    } else {
-      await createMotionClip(output, clipDuration, index);
-    }
-    normalizedClips.push(output);
-    await progress("stock-search", 45 + Math.round(((index + 1) / clipCount) * 18), `Prepared visual ${index + 1} of ${clipCount}`);
-  }
+    const source = stock[index];
+    const motionOptions = { motion: profile.motions[index % profile.motions.length], grade: profile.grade };
+    if (source?.type === "image") await normalizeStillImage(source.file, output, clipDuration, motionOptions);
+    else if (source) await normalizeStockClip(source.file, output, clipDuration, motionOptions);
+    else await createMotionClip(output, clipDuration, index);
+    preparedCount += 1;
+    await progress("stock-search", 45 + Math.round((preparedCount / clipCount) * 18), `Prepared visual ${preparedCount} of ${clipCount}`);
+    return { output, license: source?.license ?? null };
+  });
+  const normalizedClips = prepared.map((clip) => clip.output);
+  const licenses = prepared.map((clip) => clip.license).filter(Boolean);
 
-  await progress("render", 68, "Stitching the clean background master");
-  const concatPath = path.join(clipsDir, "concat.txt");
-  await writeFile(concatPath, normalizedClips.map((file) => `file '${file.replaceAll("'", "'\\''")}'`).join("\n"), "utf8");
+  await progress("render", 68, "Stitching the master with cross-clip transitions");
   const cleanPath = path.join(outputDir, "clean-background.mp4");
+  const transitionGraph = buildXfadeChain(normalizedClips.length, clipDuration, transitionSeconds, profile.transitions);
   await run(ffmpegPath, [
-    "-y", "-f", "concat", "-safe", "0", "-i", concatPath,
+    "-y", ...normalizedClips.flatMap((file) => ["-i", file]),
+    "-filter_complex", transitionGraph, "-map", "[vout]",
     "-t", targetDuration.toFixed(2),
-    "-vf", "scale=1080:1920:flags=lanczos,fps=30,format=yuv420p",
-    "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-movflags", "+faststart", cleanPath,
+    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-movflags", "+faststart", cleanPath,
   ]);
 
   await progress("thumbnail", 80, "Designing the social thumbnail");
@@ -93,21 +100,26 @@ export async function renderJob(job, progress) {
   await createThumbnail(cleanPath, thumbnailPath, canonicalSegments[0] ?? makeTitle(job.request.prompt), job.request.category, outputDir);
 
   await progress("captions", 82, "Burning high-contrast safe-zone captions");
+  const music = await musicPromise;
   const finalPath = path.join(outputDir, "final.mp4");
   const escapedSubtitlePath = styledCaptionsPath.replaceAll("\\", "\\\\").replaceAll(":", "\\:").replaceAll("'", "\\'");
-  const captionFilter = `ass='${escapedSubtitlePath}'`;
+  // Burn captions, then set the very first frame to the generated thumbnail so the file's poster frame
+  // is the designed cover. Audio and caption timing are untouched (only frame 0 is replaced).
+  const videoGraph = `[0:v]ass='${escapedSubtitlePath}'[capped];[3:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p[cover];[capped][cover]overlay=enable='eq(n,0)'[vout]`;
+  const audioGraph = `[1:a]apad=whole_dur=${targetDuration.toFixed(2)},volume=1.0,asplit=2[voice_sc][voice_mix];[2:a]atrim=0:${targetDuration.toFixed(2)},volume='if(lt(t\\,1.4)\\,0.72\\,if(gt(t\\,${Math.max(0, targetDuration - 3.2).toFixed(2)})\\,0.60\\,0.34))':eval=frame[music];[music][voice_sc]sidechaincompress=threshold=0.075:ratio=4:attack=18:release=260:makeup=1[ducked];[voice_mix][ducked]amix=inputs=2:duration=longest:weights='1 1':normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[aout]`;
   await run(ffmpegPath, [
-    "-y", "-i", cleanPath, "-i", fittedNarration.path, "-i", music.path,
-    "-vf", captionFilter,
-    "-filter_complex", `[1:a]apad=whole_dur=${targetDuration.toFixed(2)},volume=1.0,asplit=2[voice_sc][voice_mix];[2:a]atrim=0:${targetDuration.toFixed(2)},volume='if(lt(t\\,1.4)\\,0.72\\,if(gt(t\\,${Math.max(0, targetDuration - 3.2).toFixed(2)})\\,0.60\\,0.34))':eval=frame[music];[music][voice_sc]sidechaincompress=threshold=0.075:ratio=4:attack=18:release=260:makeup=1[ducked];[voice_mix][ducked]amix=inputs=2:duration=longest:weights='1 1':normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[aout]`,
-    "-map", "0:v", "-map", "[aout]",
+    "-y", "-i", cleanPath, "-i", fittedNarration.path, "-i", music.path, "-i", thumbnailPath,
+    "-filter_complex", `${videoGraph};${audioGraph}`,
+    "-map", "[vout]", "-map", "[aout]",
     "-t", targetDuration.toFixed(2),
-    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+    // Constant motion (Ken Burns zoom, transitions, animated captions) defeats interframe compression,
+    // so cap the bitrate and use a more efficient preset to keep the uploaded file a sensible size.
+    "-c:v", "libx264", "-preset", "faster", "-crf", "23", "-maxrate", "10M", "-bufsize", "20M", "-pix_fmt", "yuv420p",
     "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", finalPath,
   ]);
 
   await progress("render", 96, "Writing metadata and platform package");
-  const platformCopy = await createPlatformCopy(job.request, canonicalScript);
+  const platformCopy = await platformCopyPromise;
   const platformCopyPath = path.join(outputDir, "publishing-copy.json");
   await writeFile(platformCopyPath, `${JSON.stringify(platformCopy, null, 2)}\n`, "utf8");
   const metadata = {
@@ -159,26 +171,26 @@ export async function renderJob(job, progress) {
 async function createScript(request) {
   const wordRange = scriptWordRange(request.duration);
   if (request.approvedScript) {
-    if (!hasEnoughScriptContent(request.approvedScript, "English", wordRange.min) || !hasCompleteScript(request.approvedScript)) {
+    if (!hasEnoughScriptContent(stripMarkers(request.approvedScript), "English", wordRange.min) || !hasCompleteScript(stripMarkers(request.approvedScript))) {
       throw new Error("The approved script is too short for the selected duration.");
     }
     return request.approvedScript;
   }
   const generated = await generateText({
-    system: `Write one original English master voiceover script for a ${request.duration} vertical knowledge reel. Target ${wordRange.min}-${wordRange.max} spoken words. Start with an immediate surprising hook, establish a curiosity gap, deliver concrete and defensible information in short spoken sentences, add a pattern interrupt roughly every 8 seconds, and finish with a useful payoff before a one-sentence CTA. Keep every sentence between 5 and 12 words so each sentence can become one synchronized narration and subtitle cue. Use only claims supported by the brief or conservative general knowledge. Explain named research effects narrowly and acknowledge important limits; never claim the brain was designed for something, can be hacked or tricked, or that one result applies universally. Do not introduce unrelated named rules, statistics, historical details, or mechanisms. Every sentence must follow logically from the one before it. This English master will be professionally translated, so avoid idioms, ambiguous pronouns, abbreviations, and culturally specific wordplay. Avoid medical, legal, financial, political, or other high-stakes claims unless the brief explicitly supplies reviewed source material. Silently review the script for factual overstatement, contradiction, and unclear phrasing before returning it. No headings, stage directions, citations, markdown, or unsupported claims.`,
+    system: `Write one original English master voiceover script for a ${request.duration} vertical knowledge reel. Target ${wordRange.min}-${wordRange.max} spoken words. Write in the voice of one knowledgeable person talking directly to the viewer as "you", with a clear point of view and genuine curiosity — not a neutral encyclopedia. Open with a personal, direct hook that creates a curiosity gap. Ground the piece in one vivid, concrete detail or mini-scene the viewer can picture, then deliver defensible information in short spoken sentences with a pattern interrupt roughly every 8 seconds, and finish with a useful payoff before a one-sentence CTA. Vary sentence rhythm naturally (mix very short punchy lines with slightly longer ones), but keep each sentence between 5 and 12 words so it maps to one synchronized narration and subtitle cue. At natural breath points between sentences you may place up to three [pause] markers on their own line, and you may end a trailing-off thought with an ellipsis; never start or end the script with a marker. Use only claims supported by the brief or conservative general knowledge. Explain named research effects narrowly and acknowledge important limits; never claim the brain was designed for something, can be hacked or tricked, or that one result applies universally. Do not introduce unrelated named rules, statistics, historical details, or mechanisms. Every sentence must follow logically from the one before it. This English master will be professionally translated, so avoid idioms, ambiguous pronouns, abbreviations, and culturally specific wordplay. Avoid medical, legal, financial, political, or other high-stakes claims unless the brief explicitly supplies reviewed source material. Silently review the script for factual overstatement, contradiction, and unclear phrasing before returning it. No headings, stage directions, citations, or markdown.`,
     user: `Topic and reviewed boundaries: ${request.prompt}\nCategory: ${request.category ?? "Knowledge"}\nAudience: curious general viewers.`,
     maxTokens: Math.max(180, Math.ceil(wordRange.max * 2.2)),
     temperature: 0.72,
   });
   if (generated) {
     const edited = await generateText({
-      system: `Act as a skeptical senior fact editor for a monetized knowledge channel. Rewrite the draft into the final English voiceover, targeting ${wordRange.min}-${wordRange.max} spoken words. The supplied brief is the source of truth. Remove or correct every claim, mechanism, recommendation, and level of certainty that is not directly supported by that brief. Never reverse a condition into an instruction, recommend creating a problem to demonstrate an effect, or imply an outcome is easy, universal, guaranteed, or biologically designed. Keep the hook strong without sensationalism. Use coherent sentences of 5-12 words, smooth transitions, one practical payoff, and one natural CTA. Silently verify logical consistency before returning. Return only the revised script with no headings, notes, citations, or markdown.`,
+      system: `Act as a skeptical senior fact editor for a monetized knowledge channel. Rewrite the draft into the final English voiceover, targeting ${wordRange.min}-${wordRange.max} spoken words. The supplied brief is the source of truth. Remove or correct every claim, mechanism, recommendation, and level of certainty that is not directly supported by that brief. Never reverse a condition into an instruction, recommend creating a problem to demonstrate an effect, or imply an outcome is easy, universal, guaranteed, or biologically designed. Keep a natural, human editorial voice with a clear point of view and a strong hook, without sensationalism. Preserve any [pause] markers between sentences. Use coherent sentences of 5-12 words with varied rhythm, smooth transitions, one practical payoff, and one natural CTA. Silently verify logical consistency before returning. Return only the revised script with no headings, notes, citations, or markdown.`,
       user: `Reviewed brief:\n${request.prompt}\n\nDraft to fact-edit:\n${generated.text}`,
       maxTokens: Math.max(220, Math.ceil(wordRange.max * 2.2)),
       temperature: 0.22,
     });
     let script = edited?.text ?? generated.text;
-    if (!hasEnoughScriptContent(script, "English", wordRange.min) || !hasCompleteScript(script)) {
+    if (!hasEnoughScriptContent(stripMarkers(script), "English", wordRange.min) || !hasCompleteScript(stripMarkers(script))) {
       const expanded = await generateText({
         system: `Expand the supplied English voiceover to ${wordRange.min}-${wordRange.max} spoken words without adding any claim, mechanism, technique, or certainty not supported by the reviewed brief. Preserve the existing meaning and factual limits. Add clarity, a concrete interrupted-email moment, smooth transitions, and useful explanation rather than repetition. Keep sentences concise and natural for synchronized narration. Return only the complete expanded script with no title, headings, word count, markdown, or notes.`,
         user: `Reviewed brief:\n${request.prompt}\n\nShort script to expand:\n${script}`,
@@ -187,8 +199,8 @@ async function createScript(request) {
       });
       if (expanded?.text) script = expanded.text;
     }
-    if (!hasEnoughScriptContent(script, "English", wordRange.min)) throw new Error(`${edited?.provider ?? generated.provider} returned a script that was too short for the retention target.`);
-    if (!hasCompleteScript(script)) throw new Error(`${edited?.provider ?? generated.provider} returned an incomplete script. Rendering stopped before narration.`);
+    if (!hasEnoughScriptContent(stripMarkers(script), "English", wordRange.min)) throw new Error(`${edited?.provider ?? generated.provider} returned a script that was too short for the retention target.`);
+    if (!hasCompleteScript(stripMarkers(script))) throw new Error(`${edited?.provider ?? generated.provider} returned an incomplete script. Rendering stopped before narration.`);
     return script;
   }
   return fallbackScript(request.prompt, wordRange.max);
@@ -278,34 +290,75 @@ function hasEnoughScriptContent(script, language, minimumWords) {
 }
 
 function hasCompleteScript(script) {
-  return /[.!?]["'”’)]?\s*$/u.test(String(script ?? "").trim());
+  return /[.!?…]["'”’)]?\s*$/u.test(String(script ?? "").trim());
 }
 
-async function createNarration(segments, language, ttsEngine, outputDir) {
+const PAUSE_MARKER = /\[\s*(?:pause|break|beat)\s*\]/gi;
+
+// Remove the human-pacing markers the script generator may insert so they never reach TTS or subtitles.
+function stripMarkers(text) {
+  return String(text ?? "").replace(PAUSE_MARKER, " ").replace(/\s{2,}/g, " ").replace(/\s+([.!?,;:…])/g, "$1").trim();
+}
+
+// Convert inline [pause] markers and trailing ellipses into per-segment silence (seconds) and clean text.
+// Returns segments and a parallel `pauses` array; indices stay aligned so cues map to the same gaps.
+function extractPauses(segments) {
+  const cleaned = [];
+  const pauses = [];
+  for (const segment of segments) {
+    const markerCount = (segment.match(PAUSE_MARKER) || []).length;
+    let text = stripMarkers(segment);
+    let pause = markerCount * 0.45;
+    if (/(?:…|\.\.\.)\s*$/.test(text)) {
+      pause += 0.3;
+      text = text.replace(/(?:…|\.\.\.)\s*$/, "").trim();
+    }
+    if (!text) continue;
+    cleaned.push(text);
+    pauses.push(Math.min(1.2, Number(pause.toFixed(2))));
+  }
+  return { segments: cleaned, pauses };
+}
+
+async function createNarration(segments, language, ttsEngine, outputDir, profile = {}, pauses = []) {
   const narrationDir = path.join(outputDir, "narration");
   await mkdir(narrationDir, { recursive: true });
   const engine = ttsEngine ?? defaultTtsEngine(language);
   const files = engine === "kokoro"
-    ? await synthesizeKokoroCues({ segments, outputDir: narrationDir })
+    ? await synthesizeKokoroCues({ segments, outputDir: narrationDir, speed: profile.kokoroSpeed })
     : engine === "voxcpm2"
-      ? await synthesizeVoxCpmCues({ segments, language, outputDir: narrationDir })
+      ? await synthesizeVoxCpmCues({ segments, language, outputDir: narrationDir, voiceDescription: profile.voxDescription })
       : await synthesizeGeminiCues({ segments, language, outputDir: narrationDir });
   const pacedFiles = engine === "gemini" && language === "Burmese" ? await paceGeminiBurmeseCues(files, narrationDir) : files;
 
-  const durations = [];
-  for (const file of pacedFiles) durations.push(await mediaDuration(file));
+  const durations = await Promise.all(pacedFiles.map((file) => mediaDuration(file)));
+  // Insert a matching-format silence clip after any segment that carried a [pause]/ellipsis marker,
+  // so the narration breathes at natural points instead of running edge to edge.
+  const gaps = pacedFiles.map((_, index) => Math.max(0, Math.min(1.2, Number(pauses[index] ?? 0))));
+  const audioFormat = gaps.some((gap) => gap > 0.01) ? await probeAudioFormat(pacedFiles[0]).catch(() => ({ rate: 24000, channels: 1 })) : null;
+  const timeline = [];
+  for (let index = 0; index < pacedFiles.length; index += 1) {
+    timeline.push(pacedFiles[index]);
+    if (audioFormat && gaps[index] > 0.01) {
+      const silence = path.join(narrationDir, `pause-${String(index + 1).padStart(3, "0")}.wav`);
+      await createSilence(silence, gaps[index], audioFormat.rate, audioFormat.channels);
+      timeline.push(silence);
+    }
+  }
   const concatPath = path.join(narrationDir, "concat.txt");
-  await writeFile(concatPath, pacedFiles.map((file) => `file '${file.replaceAll("'", "'\\''")}'`).join("\n"), "utf8");
+  await writeFile(concatPath, timeline.map((file) => `file '${file.replaceAll("'", "'\\''")}'`).join("\n"), "utf8");
   const output = path.join(outputDir, "voice-cued.m4a");
   await run(ffmpegPath, ["-y", "-f", "concat", "-safe", "0", "-i", concatPath, "-c:a", "aac", "-b:a", "192k", "-ar", "48000", output]);
   const outputDuration = await mediaDuration(output);
-  const sourceDuration = durations.reduce((sum, duration) => sum + duration, 0);
+  const sourceDuration = durations.reduce((sum, duration) => sum + duration, 0) + gaps.reduce((sum, gap) => sum + gap, 0);
   const scale = outputDuration / sourceDuration;
   let cursor = 0;
-  const cues = durations.map((duration) => {
+  const cues = durations.map((duration, index) => {
     const start = cursor;
     cursor += duration * scale;
-    return { start, end: cursor };
+    const end = cursor;
+    cursor += gaps[index] * scale;
+    return { start, end };
   });
   return {
     path: output,
@@ -321,13 +374,11 @@ async function createNarration(segments, language, ttsEngine, outputDir) {
 
 async function paceGeminiBurmeseCues(files, outputDir) {
   const speed = Math.max(0.82, Math.min(1.02, Number(process.env.GEMINI_TTS_BURMESE_SPEED || 0.94)));
-  const paced = [];
-  for (let index = 0; index < files.length; index += 1) {
+  return mapWithConcurrency(files, clipEncodeConcurrency(), async (file, index) => {
     const output = path.join(outputDir, `paced-${String(index + 1).padStart(3, "0")}.wav`);
-    await run(ffmpegPath, ["-y", "-i", files[index], "-filter:a", atempoFilter(speed), "-ar", "24000", "-ac", "1", output]);
-    paced.push(output);
-  }
-  return paced;
+    await run(ffmpegPath, ["-y", "-i", file, "-filter:a", atempoFilter(speed), "-ar", "24000", "-ac", "1", output]);
+    return output;
+  });
 }
 
 async function fitNarration(narration, targetDuration, outputDir, language = "English") {
@@ -405,6 +456,92 @@ function musicPreset(category = "Knowledge") {
   return { name: "Curiosity Pulse", root: 138.591, minor: false, lowpass: 6500 };
 }
 
+// Topic-aware look and feel: color grade, camera motion, transition set, pacing, subtitle style, and
+// voice tone are chosen per category so videos read as deliberately produced rather than templated.
+// Transition names are restricted to a set verified to exist in the bundled ffmpeg xfade filter.
+function styleProfile(category = "Knowledge") {
+  const value = String(category).toLowerCase();
+  const base = {
+    grade: "eq=contrast=1.05:saturation=1.12",
+    motions: ["zoomin", "pan", "zoomout", "pan"],
+    transitions: ["fade", "slideleft", "circleopen", "wipeleft", "dissolve"],
+    transitionSeconds: 0.5,
+    clipSeconds: 3.2,
+    subtitle: { fontsize: 64, outline: "&H00202020", marginV: 440, animate: true, kinetic: true, highlight: "&H0000FFFF" },
+    kokoroSpeed: 1.15,
+    voxDescription: "A clear, energetic, confident knowledge presenter with a warm natural voice and a medium conversational pace.",
+  };
+  if (value.includes("technology")) return { ...base,
+    grade: "eq=contrast=1.08:saturation=1.03,colorbalance=bs=0.05:rm=-0.02",
+    motions: ["zoomin", "zoomout", "pan"],
+    transitions: ["slideleft", "wipeleft", "smoothright", "fade"],
+    clipSeconds: 2.8,
+    subtitle: { fontsize: 66, outline: "&H00A85200", marginV: 470, animate: true, kinetic: true, highlight: "&H00FFFF00" },
+    kokoroSpeed: 1.2,
+    voxDescription: "A crisp, modern, high-energy technology presenter with a confident, articulate voice and a brisk pace.",
+  };
+  if (value.includes("business")) return { ...base,
+    grade: "eq=contrast=1.07:saturation=1.05",
+    transitions: ["slideup", "wipeleft", "fade", "slideleft"],
+    clipSeconds: 2.9,
+    subtitle: { fontsize: 64, outline: "&H00202020", marginV: 450, animate: true, kinetic: true, highlight: "&H0000FF00" },
+    kokoroSpeed: 1.22,
+    voxDescription: "A confident, motivating business presenter with a clear, persuasive voice and an energetic, purposeful pace.",
+  };
+  if (value.includes("history")) return { ...base,
+    grade: "eq=contrast=1.03:saturation=0.9:gamma=0.98,colorbalance=rs=0.06:bs=-0.05",
+    motions: ["pan", "zoomin", "pan", "zoomout"],
+    transitions: ["fade", "dissolve", "circleclose"],
+    clipSeconds: 3.6,
+    subtitle: { fontsize: 62, outline: "&H00203040", marginV: 430, animate: true, kinetic: true, highlight: "&H000098FF" },
+    kokoroSpeed: 1.08,
+    voxDescription: "A warm, measured storyteller with a rich, calm voice and an unhurried, cinematic pace.",
+  };
+  if (value.includes("wellness")) return { ...base,
+    grade: "eq=contrast=1.0:saturation=1.05:brightness=0.03",
+    motions: ["pan", "zoomin", "pan"],
+    transitions: ["fade", "dissolve", "circleopen"],
+    clipSeconds: 3.8,
+    subtitle: { fontsize: 60, outline: "&H00404020", marginV: 420, animate: true, kinetic: true, highlight: "&H00D0FF80" },
+    kokoroSpeed: 1.05,
+    voxDescription: "A soothing, warm wellness presenter with a gentle, reassuring voice and a slow, calming pace.",
+  };
+  if (value.includes("psychology")) return { ...base,
+    grade: "eq=contrast=1.1:saturation=1.0,colorbalance=bs=0.04",
+    transitions: ["fade", "dissolve", "slideleft", "circleopen"],
+    clipSeconds: 3.2,
+    subtitle: { fontsize: 64, outline: "&H00301A2A", marginV: 450, animate: true, kinetic: true, highlight: "&H00FF66FF" },
+    kokoroSpeed: 1.12,
+    voxDescription: "A thoughtful, engaging psychology presenter with a warm, curious voice and a natural, deliberate pace.",
+  };
+  return base;
+}
+
+function motionFilter(motion) {
+  if (motion === "pan") return "crop=720:1280:x='20+20*sin(t*0.8)':y='36+36*cos(t*0.65)'";
+  if (motion === "zoomout") return "crop=720:1280,zoompan=z='if(eq(on,0),1.35,max(1.001,zoom-0.0016))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=720x1280:fps=30";
+  return "crop=720:1280,zoompan=z='min(zoom+0.0016,1.35)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=720x1280:fps=30";
+}
+
+// Assemble N normalized clips into one 1080x1920 master with cross-clip transitions.
+// Each clip contributes (clipSeconds - overlap) of unique screen time; the graph output length is
+// (count - 1) * (clipSeconds - overlap) + clipSeconds, then trimmed to the target duration.
+function buildXfadeChain(count, clipSeconds, overlap, transitions) {
+  const scale = (index) => `[${index}:v]scale=1080:1920:flags=lanczos,fps=30,setsar=1,format=yuv420p,settb=AVTB[v${index}]`;
+  if (count <= 1) return `${scale(0).replace("[v0]", "[vout]")}`;
+  const parts = Array.from({ length: count }, (_, index) => scale(index));
+  let last = "v0";
+  let offset = clipSeconds - overlap;
+  for (let index = 1; index < count; index += 1) {
+    const out = index === count - 1 ? "vout" : `x${index}`;
+    const transition = transitions[(index - 1) % transitions.length];
+    parts.push(`[${last}][v${index}]xfade=transition=${transition}:duration=${overlap.toFixed(2)}:offset=${offset.toFixed(2)}[${out}]`);
+    last = out;
+    offset += clipSeconds - overlap;
+  }
+  return parts.join(";");
+}
+
 function atempoFilter(speed) {
   const factors = [];
   let remaining = speed;
@@ -445,23 +582,50 @@ async function translateBatch(batch, sourceLanguage, targetLanguage, purpose) {
   }
 }
 
-async function createVisualQueries(script, category) {
+// One concrete visual search phrase per narration line, aligned by index, so footage can track what
+// is actually being said. Falls back to per-line keywords when no text provider is available.
+async function createSegmentQueries(segments, category) {
+  const fallback = segments.map((segment) => {
+    const words = uniqueWords(segment).slice(0, 3);
+    return words.length >= 2 ? words.join(" ") : `${category ?? "knowledge"} ${words.join(" ")}`.trim();
+  });
   try {
+    const numbered = segments.map((segment, index) => `${index}. ${segment}`).join("\n");
     const generated = await generateText({
-      system: "Create exactly six short stock-video search phrases for this script. Each phrase must describe a concrete, filmable person, object, action, or location that directly matches a different moment in the narration. Prioritize the opening hook in the first phrase. Avoid abstract concepts, production terminology, cameras, film crews, logos, proper names, and the words video, reel, footage, animation, or background. Return only six tagged blocks in this format: <Q>person writing email on laptop</Q>.",
-      user: `Category: ${category ?? "Knowledge"}\nScript: ${script}`,
-      maxTokens: 280,
-      temperature: 0.2,
+      system: "For each numbered narration line, give ONE short stock-media search phrase (2-6 words) describing a concrete, filmable person, object, action, or place that visually represents that specific line. Avoid abstract concepts, on-screen text, logos, proper names, and the words video, footage, animation, or background. Return one line per input formatted exactly as \"<index>: phrase\", keeping the same indexes and order.",
+      user: `Category: ${category ?? "Knowledge"}\nLines:\n${numbered}`,
+      maxTokens: Math.min(1400, 60 + segments.length * 26),
+      temperature: 0.3,
     });
-    const queries = [...String(generated?.text ?? "").matchAll(/<Q>([\s\S]*?)<\/Q>/gi)]
-      .map((match) => match[1].trim().replace(/[.!?]+$/, ""))
-      .filter((query) => query.split(/\s+/).length >= 2 && query.length <= 90);
-    if (queries.length >= 4) return queries.slice(0, 6);
+    if (generated?.text) {
+      const byIndex = new Map();
+      for (const match of String(generated.text).matchAll(/^\s*(\d+)\s*[:.)\-]\s*(.+)$/gm)) {
+        const phrase = match[2].trim().replace(/^["']|["']$/g, "").replace(/[.!?]+$/, "").trim();
+        if (phrase.split(/\s+/).length >= 2 && phrase.length <= 90) byIndex.set(Number(match[1]), phrase);
+      }
+      if (byIndex.size) return segments.map((_, index) => byIndex.get(index) ?? fallback[index]);
+    }
   } catch {
-    // Fall back to deterministic script keywords below.
+    // Fall back to deterministic per-line keywords below.
   }
-  const keywords = uniqueWords(script).slice(0, 18);
-  return [0, 3, 6, 9, 12, 15].map((offset) => keywords.slice(offset, offset + 3).join(" ")).filter((query) => query.split(/\s+/).length >= 2);
+  return fallback;
+}
+
+// Map each clip slot to the narration line playing during it, so the clip's footage matches the words.
+// The clip's midpoint on the timeline picks the cue whose window it falls in (or the last one started).
+export function planClipQueries(clipCount, clipDuration, transitionSeconds, cues, segmentQueries) {
+  const step = Math.max(0.1, clipDuration - transitionSeconds);
+  const fallbackQuery = segmentQueries.find(Boolean) ?? "";
+  return Array.from({ length: clipCount }, (_, index) => {
+    const midpoint = index * step + clipDuration / 2;
+    let cueIndex = 0;
+    for (let j = 0; j < cues.length; j += 1) {
+      if (cues[j].start <= midpoint) cueIndex = j;
+      else break;
+    }
+    const clamped = Math.max(0, Math.min(segmentQueries.length - 1, cueIndex));
+    return segmentQueries[clamped] || fallbackQuery;
+  });
 }
 
 function validateLanguageText(segments, language, label) {
@@ -498,69 +662,131 @@ function normalizeTranslatedScript(segments, language) {
     .trim());
 }
 
-async function findStockClips(request, count, clipsDir, visualQueries = [], progress = async () => {}) {
-  if (!process.env.PEXELS_API_KEY) return [];
+// Find one licensed source per clip slot, matched to that slot's query. Prefers a portrait video;
+// when a query has no video (common for abstract topics) it falls back to a photo the pipeline
+// animates with Ken Burns motion. Returns an array aligned 1:1 with clipPlan (null => motion clip).
+async function findStockClips(request, clipPlan, clipsDir, progress = async () => {}) {
+  const clipCount = clipPlan.length;
+  const key = process.env.PEXELS_API_KEY;
+  if (!key) return new Array(clipCount).fill(null);
   try {
-    await progress("stock-search", 40, "Searching Pexels for relevant portrait clips");
+    await progress("stock-search", 40, "Searching Pexels for footage that matches each line");
     const category = String(request.category ?? "knowledge").trim();
-    const keywords = uniqueWords(request.prompt).slice(0, 12);
-    const queries = [...new Set([
-      ...visualQueries,
-      [category, ...keywords.slice(0, 3)].join(" "),
-      keywords.slice(3, 7).join(" "),
-      `${category} practical example`,
-    ].map((query) => query.trim()).filter((query) => query.split(/\s+/).length >= 2))].slice(0, 4);
-    const results = await Promise.all(queries.map(async (query) => {
-      const perPage = Math.min(10, Math.max(6, Math.ceil(count / queries.length)));
-      const response = await fetchWithTimeout(`https://api.pexels.com/v1/videos/search?query=${encodeURIComponent(query)}&orientation=portrait&size=medium&per_page=${perPage}`, { headers: { Authorization: process.env.PEXELS_API_KEY } }, 20_000);
-      if (!response.ok) return [];
-      const data = await response.json();
-      return data.videos ?? [];
-    }));
-    await progress("stock-search", 41, "Selecting lightweight licensed clips");
-    const interleaved = [];
-    const resultDepth = Math.max(0, ...results.map((items) => items.length));
-    for (let row = 0; row < resultDepth; row += 1) for (const items of results) if (items[row]) interleaved.push(items[row]);
-    const seen = new Set();
-    const candidates = interleaved.map((video) => {
-      if (seen.has(video.id)) return null;
-      seen.add(video.id);
-      const files = [...(video.video_files ?? [])].sort((a, b) => Math.abs((a.width ?? 0) - 720) - Math.abs((b.width ?? 0) - 720));
-      const chosen = files.find((file) => file.file_type === "video/mp4" && (file.height ?? 0) >= (file.width ?? 0)) ?? files.find((file) => file.file_type === "video/mp4");
-      return chosen ? { url: chosen.link, id: video.id, page: video.url, creator: video.user?.name ?? "Pexels contributor" } : null;
-    }).filter(Boolean).slice(0, Math.min(count, 12));
-    const downloaded = [];
-    const concurrency = 4;
-    for (let offset = 0; offset < candidates.length; offset += concurrency) {
-      const batch = candidates.slice(offset, offset + concurrency);
-      const results = await Promise.all(batch.map(async (candidate, batchIndex) => {
-        try {
-          const response = await fetchWithTimeout(candidate.url, {}, 25_000);
-          if (!response.ok) return null;
-          const file = path.join(clipsDir, `source-${String(offset + batchIndex + 1).padStart(2, "0")}.mp4`);
-          await writeFile(file, Buffer.from(await response.arrayBuffer()));
-          return {
-            file,
-            license: { provider: "Pexels", mediaId: candidate.id, creator: candidate.creator, sourceUrl: candidate.page, license: "Pexels License" },
-          };
-        } catch {
-          return null;
-        }
-      }));
-      downloaded.push(...results.filter(Boolean));
-      const finished = Math.min(candidates.length, offset + batch.length);
-      await progress("stock-search", 41 + Math.round((finished / Math.max(1, candidates.length)) * 4), `Downloaded ${downloaded.length} of ${candidates.length} licensed source clips`);
+    const uniqueQueries = [...new Set(clipPlan.filter(Boolean))].slice(0, 14);
+    if (!uniqueQueries.length) uniqueQueries.push([category, ...uniqueWords(request.prompt).slice(0, 3)].join(" ").trim());
+    const seenMediaIds = new Set();
+    const byQuery = new Map();
+    await mapWithConcurrency(uniqueQueries, 4, async (query) => {
+      const media = (await searchPexelsMedia(query, key)).filter((item) => item && !seenMediaIds.has(item.id));
+      media.forEach((item) => seenMediaIds.add(item.id));
+      byQuery.set(query, media);
+    });
+
+    // Assign a distinct candidate to each clip from its own query first, then borrow spares, then reuse.
+    const pointers = new Map();
+    const chosen = clipPlan.map((query) => {
+      const list = byQuery.get(query) ?? [];
+      const pointer = pointers.get(query) ?? 0;
+      if (list[pointer]) { pointers.set(query, pointer + 1); return list[pointer]; }
+      return null;
+    });
+    const used = new Set(chosen.filter(Boolean).map((item) => item.id));
+    const spares = [...byQuery.values()].flat().filter((item) => !used.has(item.id));
+    let spareIndex = 0;
+    for (let index = 0; index < chosen.length; index += 1) {
+      if (!chosen[index] && spareIndex < spares.length) { chosen[index] = spares[spareIndex++]; used.add(chosen[index].id); }
     }
-    return downloaded;
+    const anyChosen = chosen.filter(Boolean);
+    for (let index = 0; index < chosen.length; index += 1) {
+      if (!chosen[index] && anyChosen.length) chosen[index] = anyChosen[index % anyChosen.length];
+    }
+
+    // Download each distinct source once (random-start sampling later keeps reused sources visually varied).
+    const distinct = [...new Map(chosen.filter(Boolean).map((item) => [item.id, item])).values()];
+    await progress("stock-search", 41, "Downloading licensed sources");
+    const downloadedById = new Map();
+    let done = 0;
+    await mapWithConcurrency(distinct, 4, async (candidate) => {
+      try {
+        const response = await fetchWithTimeout(candidate.url, {}, 25_000);
+        if (response.ok) {
+          const extension = candidate.type === "image" ? "jpg" : "mp4";
+          const file = path.join(clipsDir, `source-${candidate.id}.${extension}`);
+          await writeFile(file, Buffer.from(await response.arrayBuffer()));
+          downloadedById.set(candidate.id, {
+            file,
+            type: candidate.type,
+            license: { provider: "Pexels", mediaType: candidate.type, mediaId: candidate.id, creator: candidate.creator, sourceUrl: candidate.page, license: "Pexels License" },
+          });
+        }
+      } catch {
+        // A failed download leaves this slot null -> motion background fallback.
+      }
+      done += 1;
+      await progress("stock-search", 41 + Math.round((done / Math.max(1, distinct.length)) * 4), `Downloaded ${done} of ${distinct.length} licensed sources`);
+    });
+    return chosen.map((item) => (item && downloadedById.get(item.id)) || null);
   } catch {
-    return [];
+    return new Array(clipCount).fill(null);
   }
 }
 
-async function normalizeStockClip(input, output, seconds) {
+// One Pexels lookup for a query: a portrait video if available, otherwise portrait photos.
+async function searchPexelsMedia(query, key) {
+  try {
+    const response = await fetchWithTimeout(`https://api.pexels.com/v1/videos/search?query=${encodeURIComponent(query)}&orientation=portrait&size=medium&per_page=4`, { headers: { Authorization: key } }, 20_000);
+    if (response.ok) {
+      const data = await response.json();
+      const videos = (data.videos ?? []).map((video) => {
+        const files = [...(video.video_files ?? [])].sort((a, b) => Math.abs((a.width ?? 0) - 720) - Math.abs((b.width ?? 0) - 720));
+        const chosen = files.find((file) => file.file_type === "video/mp4" && (file.height ?? 0) >= (file.width ?? 0)) ?? files.find((file) => file.file_type === "video/mp4");
+        return chosen ? { type: "video", id: `v${video.id}`, url: chosen.link, page: video.url, creator: video.user?.name ?? "Pexels contributor" } : null;
+      }).filter(Boolean);
+      if (videos.length) return videos;
+    }
+  } catch {
+    // Fall through to a photo search.
+  }
+  try {
+    const response = await fetchWithTimeout(`https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=4`, { headers: { Authorization: key } }, 20_000);
+    if (response.ok) {
+      const data = await response.json();
+      return (data.photos ?? []).map((photo) => {
+        const url = photo.src?.portrait ?? photo.src?.large2x ?? photo.src?.large ?? photo.src?.original;
+        return url ? { type: "image", id: `p${photo.id}`, url, page: photo.url, creator: photo.photographer ?? "Pexels contributor" } : null;
+      }).filter(Boolean);
+    }
+  } catch {
+    // No media for this query -> caller falls back to spares or a motion background.
+  }
+  return [];
+}
+
+async function normalizeStockClip(input, output, seconds, options = {}) {
+  const motion = options.motion ?? "zoomin";
+  const grade = options.grade ?? "eq=contrast=1.04:saturation=1.1";
+  // Sample a random window of the source so reused clips never show the same footage twice.
+  const sourceDuration = await mediaDuration(input).catch(() => 0);
+  const seek = sourceDuration > seconds + 0.6
+    ? ["-ss", (Math.random() * (sourceDuration - seconds - 0.3)).toFixed(2), "-i", input, "-t", String(seconds)]
+    : ["-stream_loop", "-1", "-i", input, "-t", String(seconds)];
+  const fadeOut = Math.max(0, seconds - 0.12).toFixed(2);
   await run(ffmpegPath, [
-    "-y", "-stream_loop", "-1", "-i", input, "-t", String(seconds),
-    "-vf", `scale=760:1352:force_original_aspect_ratio=increase,crop=720:1280:x='20+20*sin(t*0.8)':y='36+36*cos(t*0.65)',fps=30,eq=contrast=1.04:saturation=1.1,fade=t=in:d=0.12,fade=t=out:st=${Math.max(0, seconds - 0.12).toFixed(2)}:d=0.12,format=yuv420p`,
+    "-y", ...seek,
+    "-vf", `scale=760:1352:force_original_aspect_ratio=increase,${motionFilter(motion)},fps=30,${grade},fade=t=in:d=0.12,fade=t=out:st=${fadeOut}:d=0.12,format=yuv420p`,
+    "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", output,
+  ]);
+}
+
+// Turn a still photo into a clip with Ken Burns motion, matching the grade/fades of video clips so it
+// composits seamlessly in the transition chain. Zoom-only motions read best on stills.
+async function normalizeStillImage(input, output, seconds, options = {}) {
+  const motion = options.motion === "pan" ? "zoomin" : (options.motion ?? "zoomin");
+  const grade = options.grade ?? "eq=contrast=1.04:saturation=1.1";
+  const fadeOut = Math.max(0, seconds - 0.12).toFixed(2);
+  await run(ffmpegPath, [
+    "-y", "-loop", "1", "-framerate", "30", "-t", String(seconds), "-i", input,
+    "-vf", `scale=760:1352:force_original_aspect_ratio=increase,${motionFilter(motion)},fps=30,${grade},fade=t=in:d=0.12,fade=t=out:st=${fadeOut}:d=0.12,format=yuv420p`,
     "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", output,
   ]);
 }
@@ -651,10 +877,55 @@ function buildSrtFromCues(segments, cues, totalDuration) {
   return cues.map((cue, index) => ({ cue, text: segments[index] })).filter(({ cue, text }) => text && cue.start < totalDuration).map(({ cue, text }, index) => `${index + 1}\n${srtTime(cue.start)} --> ${srtTime(Math.min(cue.end, totalDuration))}\n${wrapSubtitle(text)}\n`).join("\n");
 }
 
-function buildAss(segments, cues, totalDuration, fontName = "Arial") {
-  const header = `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\nStyle: Reelio,${fontName},62,&H00FFFFFF,&H00FFFFFF,&H00000000,&H76000000,-1,0,0,0,100,100,0,0,3,10,0,2,90,90,430,1\n\n[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n`;
-  const events = cues.map((cue, index) => ({ cue, text: segments[index] })).filter(({ cue, text }) => text && cue.start < totalDuration).map(({ cue, text }) => `Dialogue: 0,${assTime(cue.start)},${assTime(Math.min(cue.end, totalDuration))},Reelio,,0,0,0,,${escapeAss(wrapSubtitle(text)).replaceAll("\n", "\\N")}`).join("\n");
+function buildAss(segments, cues, totalDuration, fontName = "Arial", style = null) {
+  // Defaults reproduce the original fixed style byte-for-byte; a per-topic `style` overrides them.
+  const s = { fontsize: 62, primary: "&H00FFFFFF", secondary: "&H00FFFFFF", outline: "&H00000000", back: "&H00000000", outlineW: 6, marginV: 430, animate: false, kinetic: false, highlight: "&H0000FFFF", ...(style ?? {}) };
+  // Kinetic mode colors already-spoken words with the highlight accent and unspoken words white.
+  const activeColour = s.kinetic ? s.highlight : s.primary;
+  const restColour = s.kinetic ? s.primary : s.secondary;
+  // BorderStyle 1 = outline stroke around the glyphs (no background box); the outline colour is the stroke.
+  const styleLine = `Style: Reelio,${fontName},${s.fontsize},${activeColour},${restColour},${s.outline},${s.back},-1,0,0,0,100,100,0,0,1,${s.outlineW},0,2,90,90,${s.marginV},1`;
+  const header = `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n${styleLine}\n\n[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n`;
+  const intro = s.animate ? (s.kinetic ? "{\\fad(80,60)}" : "{\\fad(120,90)}") : "";
+  const events = cues.map((cue, index) => ({ cue, text: segments[index] })).filter(({ cue, text }) => text && cue.start < totalDuration).map(({ cue, text }) => {
+    const end = Math.min(cue.end, totalDuration);
+    const body = s.kinetic ? buildKaraokeLine(text, Math.max(0.2, end - cue.start), subtitleMaxChars(s.fontsize)) : `${escapeAss(wrapSubtitle(text)).replaceAll("\n", "\\N")}`;
+    return `Dialogue: 0,${assTime(cue.start)},${assTime(end)},Reelio,,0,0,0,,${intro}${body}`;
+  }).join("\n");
   return `${header}${events}\n`;
+}
+
+// Characters that safely fit one line: usable width is 1080 minus the 90px side margins, and a bold
+// glyph advance is ~0.6*fontsize. Larger fonts therefore wrap sooner so text never runs off-screen.
+function subtitleMaxChars(fontsize) {
+  return Math.max(14, Math.floor(900 / (Math.max(1, Number(fontsize) || 62) * 0.6)));
+}
+
+// Word-by-word karaoke: each word carries a \kf sweep whose centiseconds are proportional to its
+// length, so the highlight tracks the narration. Wraps to a new line once a line runs out of width.
+function buildKaraokeLine(text, durationSeconds, maxChars = 28) {
+  const words = String(text).trim().replace(/\s+/g, " ").split(" ").filter(Boolean);
+  if (!words.length) return "";
+  const totalCs = Math.max(1, Math.round(durationSeconds * 100));
+  const weights = words.map((word) => Math.max(2, word.length));
+  const weightSum = weights.reduce((sum, weight) => sum + weight, 0);
+  let used = 0;
+  const durations = weights.map((weight, index) => {
+    if (index === weights.length - 1) return Math.max(1, totalCs - used);
+    const value = Math.max(1, Math.round((weight / weightSum) * totalCs));
+    used += value;
+    return value;
+  });
+  const lines = [];
+  let current = [];
+  let length = 0;
+  words.forEach((word, index) => {
+    if (length && length + 1 + word.length > maxChars) { lines.push(current); current = []; length = 0; }
+    current.push(`{\\kf${durations[index]}}${escapeAss(word)}`);
+    length += (length ? 1 : 0) + word.length;
+  });
+  if (current.length) lines.push(current);
+  return lines.map((line) => line.join(" ")).join("\\N");
 }
 
 function wrapSubtitle(text) {
@@ -749,6 +1020,17 @@ async function mediaDuration(file) {
   return duration;
 }
 
+async function probeAudioFormat(file) {
+  const output = await run(ffprobePath, ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate,channels", "-of", "default=noprint_wrappers=1:nokey=1", file]);
+  const [rate, channels] = output.trim().split("\n").map((value) => Number(value));
+  return { rate: Number.isFinite(rate) && rate > 0 ? rate : 24000, channels: Number.isFinite(channels) && channels > 0 ? channels : 1 };
+}
+
+// A silence clip in the same PCM format as the narration cues, so the concat demuxer stays uniform.
+async function createSilence(output, seconds, rate = 24000, channels = 1) {
+  await run(ffmpegPath, ["-y", "-f", "lavfi", "-i", `anullsrc=r=${rate}:cl=${channels >= 2 ? "stereo" : "mono"}`, "-t", seconds.toFixed(3), "-c:a", "pcm_s16le", output]);
+}
+
 function uniqueWords(text) {
   const stop = new Set(["this", "that", "with", "from", "your", "into", "what", "when", "where", "about", "using", "make", "video", "explain"]);
   return [...new Set(String(text).toLowerCase().match(/[a-z0-9]{4,}/g)?.filter((word) => !stop.has(word)) ?? [])];
@@ -761,6 +1043,25 @@ function makeTitle(prompt) {
 
 async function asset(file) {
   return { file, name: path.basename(file), bytes: (await stat(file)).size };
+}
+
+function clipEncodeConcurrency() {
+  const requested = Number(process.env.REELIO_CLIP_CONCURRENCY);
+  if (Number.isInteger(requested) && requested >= 1) return Math.min(8, requested);
+  return Math.max(1, Math.min(4, (os.availableParallelism?.() ?? 4) - 1));
+}
+
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results[index] = await worker(items[index], index);
+    }
+  }));
+  return results;
 }
 
 function run(command, args) {
@@ -823,4 +1124,4 @@ async function fetchWithTimeout(url, options, timeoutMs = 60_000) {
   }
 }
 
-export { buildAss, buildSrt, chooseDuration, createCuratedMusic, ffmpegPath, ffprobePath, segmentText, validateLanguageText };
+export { buildAss, buildSrt, buildXfadeChain, chooseDuration, createCuratedMusic, extractPauses, ffmpegPath, ffprobePath, motionFilter, segmentText, styleProfile, validateLanguageText };

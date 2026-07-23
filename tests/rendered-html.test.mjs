@@ -1,5 +1,20 @@
 import assert from "node:assert/strict";
+import { readdir, readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
+
+const appDir = fileURLToPath(new URL("../app", import.meta.url));
+
+async function readAppSource() {
+  const entries = await readdir(appDir, { recursive: true, withFileTypes: true });
+  const files = entries
+    .filter((entry) => entry.isFile() && /\.(ts|tsx)$/.test(entry.name))
+    .map((entry) => path.join(entry.parentPath, entry.name))
+    .sort();
+  const sources = await Promise.all(files.map((file) => readFile(file, "utf8")));
+  return sources.join("\n");
+}
 
 async function render() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -24,7 +39,6 @@ test("renders the Reelio creator shell", async () => {
 });
 
 test("keeps the active AI provider contracts in the project", async () => {
-  const { readFile } = await import("node:fs/promises");
   const envExample = await readFile(new URL("../.env.example", import.meta.url), "utf8");
   assert.match(envExample, /REELIO_TEXT_PROVIDER=google/);
   assert.match(envExample, /GEMINI_API_KEY=/);
@@ -45,8 +59,7 @@ test("keeps the active AI provider contracts in the project", async () => {
 });
 
 test("includes the complete video detail workflow", async () => {
-  const { readFile } = await import("node:fs/promises");
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readAppSource();
   assert.match(page, /function VideoDetailView/);
   assert.match(page, /View details/);
   assert.match(page, /Generate language version/);
@@ -77,8 +90,7 @@ test("includes the complete video detail workflow", async () => {
 });
 
 test("includes guided YouTube OAuth setup in Settings", async () => {
-  const { readFile } = await import("node:fs/promises");
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readAppSource();
   assert.match(page, /Connect YouTube/);
   assert.match(page, /Enable YouTube Data API v3/);
   assert.match(page, /Set up Google Auth Platform/);
@@ -88,8 +100,7 @@ test("includes guided YouTube OAuth setup in Settings", async () => {
 });
 
 test("includes guided TikTok Content Posting setup in Settings", async () => {
-  const { readFile } = await import("node:fs/promises");
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readAppSource();
   assert.match(page, /Connect TikTok/);
   assert.match(page, /Content Posting API/);
   assert.match(page, /video\.upload/);
@@ -98,34 +109,41 @@ test("includes guided TikTok Content Posting setup in Settings", async () => {
   assert.match(page, /Save & connect TikTok/);
 });
 
-test("includes guided Facebook Page Reels setup in Settings", async () => {
-  const { readFile } = await import("node:fs/promises");
-  const [page, service] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+test("includes guided Facebook OAuth setup in Settings", async () => {
+  const [page, service, facebookOauth] = await Promise.all([
+    readAppSource(),
     readFile(new URL("../local-service/server.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../local-service/facebook-oauth.mjs", import.meta.url), "utf8"),
   ]);
-  assert.match(page, /Connect Facebook Page/);
-  assert.match(page, /pages_show_list/);
-  assert.match(page, /pages_read_engagement/);
+  assert.match(page, /Connect Facebook/);
+  assert.match(page, /Save & connect Facebook/);
+  assert.match(page, /oauth\/facebook\/start/);
+  assert.match(page, /oauth\/facebook\/select-page/);
+  assert.match(page, /Meta app ID/);
+  assert.match(page, /Meta app secret/);
+  assert.match(page, /Valid OAuth Redirect URIs/);
+  assert.match(page, /Choose the Facebook Page to publish to/);
+  // The Meta Login scopes remain part of the guide.
   assert.match(page, /pages_manage_posts/);
   assert.match(page, /business_management/);
-  assert.match(page, /Do not mix up these IDs/);
-  assert.match(page, /me\/accounts\?fields=name,access_token,tasks/);
-  assert.match(page, /If the response says.*data: \[\]/);
-  assert.match(page, /me\/permissions/);
-  assert.doesNotMatch(page, /61592195997189/);
-  assert.doesNotMatch(page, /className="query-warning"/);
-  assert.match(page, /Save & check Facebook/);
+  assert.match(page, /instagram_content_publish/);
+  // The old manual Graph API Explorer token flow is gone.
+  assert.doesNotMatch(page, /Do not mix up these IDs/);
+  assert.doesNotMatch(page, /me\/accounts\?fields=name,access_token,tasks/);
+  assert.doesNotMatch(page, /Save & check Facebook/);
+  assert.match(page, /reelio-facebook-oauth/);
   assert.match(service, /publishing\/facebook\/status/);
-  assert.match(service, /Facebook Page token verified/);
-  assert.match(service, /fields: "id,name"/);
-  assert.match(service, /same GET \/me\/accounts entry/);
+  assert.match(service, /oauth\/facebook\/callback/);
+  assert.match(facebookOauth, /buildFacebookAuthorizationUrl/);
+  assert.match(facebookOauth, /Facebook Page token verified/);
+  assert.match(facebookOauth, /fields: "id,name"/);
+  assert.match(facebookOauth, /same GET \/me\/accounts entry/);
+  assert.match(facebookOauth, /fb_exchange_token/);
 });
 
 test("includes guided Instagram Reels setup without an inline credential form", async () => {
-  const { readFile } = await import("node:fs/promises");
   const [page, service, styles] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readAppSource(),
     readFile(new URL("../local-service/server.mjs", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);

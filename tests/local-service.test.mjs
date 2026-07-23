@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
-import { buildAss, buildSrt, chooseDuration, ffmpegPath, segmentText, validateLanguageText } from "../local-service/pipeline.mjs";
+import { buildAss, buildSrt, buildXfadeChain, chooseDuration, extractPauses, ffmpegPath, motionFilter, planClipQueries, segmentText, styleProfile, validateLanguageText } from "../local-service/pipeline.mjs";
+import { parseVoiceBlend } from "../local-service/kokoro-client.mjs";
 import { parseByteRange } from "../local-service/http-utils.mjs";
 import { durationBounds, normalizeVideoRequest, ValidationError } from "../local-service/validation.mjs";
 import { kokoroConfig } from "../local-service/kokoro-client.mjs";
@@ -13,6 +14,7 @@ import { normalizeIdeaOutput } from "../local-service/idea-generator.mjs";
 import { JobStoppedError, registerJobProcess, runWithJobControl, stopJobExecution } from "../local-service/job-control.mjs";
 import { buildYouTubeAuthorizationUrl } from "../local-service/youtube-oauth.mjs";
 import { buildTikTokAuthorizationUrl } from "../local-service/tiktok-oauth.mjs";
+import { buildFacebookAuthorizationUrl } from "../local-service/facebook-oauth.mjs";
 import { buildTikTokUploadPlan, buildYouTubeUploadPlan, publishingMediaIssue } from "../local-service/publishers.mjs";
 
 test("uses Google Gemini as the primary multilingual text provider with OpenRouter fallback", () => {
@@ -41,6 +43,17 @@ test("builds a PKCE-protected TikTok Desktop OAuth request", () => {
   assert.equal(auth.searchParams.get("code_challenge"), "abc123");
   assert.match(auth.searchParams.get("scope"), /user\.info\.basic/);
   assert.match(auth.searchParams.get("scope"), /video\.upload/);
+});
+
+test("builds a Meta Login request for Facebook and Instagram publishing", () => {
+  const auth = new URL(buildFacebookAuthorizationUrl({ appId: "app-id", redirectUri: "http://127.0.0.1:8788/oauth/facebook/callback", state: "csrf-state", graphVersion: "v23.0" }));
+  assert.equal(auth.origin, "https://www.facebook.com");
+  assert.equal(auth.pathname, "/v23.0/dialog/oauth");
+  assert.equal(auth.searchParams.get("response_type"), "code");
+  assert.equal(auth.searchParams.get("client_id"), "app-id");
+  assert.equal(auth.searchParams.get("state"), "csrf-state");
+  assert.match(auth.searchParams.get("scope"), /pages_manage_posts/);
+  assert.match(auth.searchParams.get("scope"), /instagram_content_publish/);
 });
 
 test("uses TikTok-compliant whole uploads and chunks", () => {
@@ -131,14 +144,21 @@ test("stops active local model processes and releases the job", async () => {
   assert.notEqual(child.exitCode ?? child.signalCode, null);
 });
 
-test("turns AI idea output into a plain fact-safe brief without UI markup", () => {
+test("normalizes AI ideas: strips markup/JSON while preserving the structured brief", () => {
+  // A single-sentence JSON idea stays a clean single line.
   assert.equal(
     normalizeIdeaOutput('```json\n{"idea":"Investigate whether listeners can distinguish hot and cold water by sound, using controlled recordings before explaining only well-supported physical differences."}\n```'),
     "Investigate whether listeners can distinguish hot and cold water by sound, using controlled recordings before explaining only well-supported physical differences.",
   );
+  // Structured briefs keep their angle line and bullet points (bullets normalized to "• ").
+  assert.equal(
+    normalizeIdeaOutput("How solid-state drives survive drops.\n- No moving parts inside\n* Data stored in flash cells\n• Why that matters for durability"),
+    "How solid-state drives survive drops.\n• No moving parts inside\n• Data stored in flash cells\n• Why that matters for durability",
+  );
+  // Stray field labels and markdown bold are removed without flattening lines together.
   assert.equal(
     normalizeIdeaOutput("**Hook:** A bold opening\n**Visuals:** A controlled side-by-side test"),
-    "A bold opening A controlled side-by-side test",
+    "A bold opening\nA controlled side-by-side test",
   );
 });
 
@@ -147,6 +167,110 @@ test("bundles an FFmpeg build with subtitle rendering", async () => {
   const result = spawnSync(ffmpegPath, ["-filters"], { encoding: "utf8" });
   assert.equal(result.status, 0);
   assert.match(result.stdout, /subtitles\s+V->V/);
+});
+
+test("chooses topic-aware look, pacing, and voice tone per category", () => {
+  const tech = styleProfile("Technology");
+  assert.equal(tech.clipSeconds, 2.8);
+  assert.equal(tech.kokoroSpeed, 1.2);
+  assert.ok(tech.transitions.includes("slideleft"));
+  assert.ok(tech.subtitle.fontsize >= 60);
+  const wellness = styleProfile("Wellness");
+  assert.ok(wellness.kokoroSpeed < tech.kokoroSpeed, "calm topics narrate slower than energetic ones");
+  const fallback = styleProfile("Something unmapped");
+  assert.equal(fallback.clipSeconds, 3.2);
+  assert.ok(Array.isArray(fallback.motions) && fallback.motions.length > 0);
+});
+
+test("builds Ken Burns motion filters for zoom and pan", () => {
+  assert.match(motionFilter("zoomin"), /zoompan=z='min\(zoom\+/);
+  assert.match(motionFilter("zoomout"), /zoompan=z='if\(eq\(on,0\),1\.35,max\(1\.001/);
+  assert.match(motionFilter("pan"), /^crop=720:1280:x='20\+20\*sin/);
+});
+
+test("assembles a cross-clip transition graph that lands on the target length", () => {
+  assert.match(buildXfadeChain(1, 3.2, 0.5, ["fade"]), /\[0:v\]scale=1080:1920[^;]*\[vout\]/);
+  const graph = buildXfadeChain(3, 3.2, 0.5, ["fade", "slideleft"]);
+  const offsets = [...graph.matchAll(/xfade=transition=(\w+):duration=0\.50:offset=([\d.]+)/g)];
+  assert.equal(offsets.length, 2);
+  assert.deepEqual(offsets.map((match) => match[2]), ["2.70", "5.40"]);
+  assert.equal(offsets[0][1], "fade");
+  assert.equal(offsets[1][1], "slideleft");
+  assert.match(graph, /\[vout\]$/);
+});
+
+test("applies a per-topic subtitle style without changing the default", () => {
+  const cues = [{ start: 0, end: 2 }, { start: 2, end: 4 }];
+  const styled = buildAss(["One line here", "Two line here"], cues, 4, "Arial", { fontsize: 66, outline: "&H00A85200", marginV: 470, animate: true });
+  // BorderStyle 1 (outline stroke, no background box); the outline colour is the stroke.
+  assert.match(styled, /Style: Reelio,Arial,66,&H00FFFFFF,&H00FFFFFF,&H00A85200,&H00000000,-1,0,0,0,100,100,0,0,1,6,0,2,90,90,470,1/);
+  assert.match(styled, /Dialogue: 0,[^,]+,[^,]+,Reelio,,0,0,0,,\{\\fad\(120,90\)\}/);
+  const plain = buildAss(["One line here", "Two line here"], cues, 4);
+  assert.match(plain, /Style: Reelio,Arial,62,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,6,0,2,90,90,430,1/);
+  assert.doesNotMatch(plain, /\\fad/);
+  // No opaque background box: BorderStyle must be 1, not 3.
+  assert.doesNotMatch(plain, /,0,0,3,\d+,0,2,/);
+});
+
+test("renders kinetic word-by-word karaoke captions when a topic enables them", () => {
+  const cues = [{ start: 0, end: 2.4 }];
+  const kinetic = buildAss(["Solid state drives have no moving parts"], cues, 2.4, "Arial", styleProfile("Technology").subtitle);
+  // Active (sung) colour is the topic highlight; unsung words stay white.
+  assert.match(kinetic, /Style: Reelio,Arial,66,&H00FFFF00,&H00FFFFFF,/);
+  assert.match(kinetic, /\{\\kf\d+\}Solid \{\\kf\d+\}state/);
+  // The plain default has no karaoke tags and keeps the original size/margin.
+  const plain = buildAss(["Solid state drives have no moving parts"], cues, 2.4);
+  assert.doesNotMatch(plain, /\\kf/);
+  assert.match(plain, /Style: Reelio,Arial,62,&H00FFFFFF,&H00FFFFFF,/);
+});
+
+test("wraps long kinetic captions to new lines so they never overflow the frame width", () => {
+  const long = "This surprisingly long sentence keeps going well past a single readable caption line";
+  const style = styleProfile("Technology").subtitle; // fontsize 66
+  const ass = buildAss([long], [{ start: 0, end: 4 }], 4, "Arial", style);
+  const dialogue = ass.split("\n").find((line) => line.startsWith("Dialogue"));
+  assert.ok(dialogue.includes("\\N"), "a long caption is broken across lines");
+  // Each rendered line (tags stripped) must fit the font-derived width budget.
+  const maxChars = Math.floor(900 / (66 * 0.6));
+  const visibleLines = dialogue.split(",").slice(9).join(",").replace(/\{[^}]*\}/g, "").split("\\N");
+  for (const line of visibleLines) assert.ok(line.trim().length <= maxChars + 1, `line "${line.trim()}" (${line.trim().length}) exceeds ${maxChars}`);
+});
+
+test("aligns each clip's footage query to the narration line playing during it", () => {
+  const cues = [{ start: 0, end: 3 }, { start: 3, end: 6 }, { start: 6, end: 9 }];
+  const queries = ["person writing a to-do list", "coffee shop counter", "runner tying shoes"];
+  const plan = planClipQueries(4, 3, 0.5, cues, queries); // step = 2.5s
+  assert.deepEqual(plan, [
+    "person writing a to-do list", // midpoint 1.5s -> line 0
+    "coffee shop counter",         // midpoint 4.0s -> line 1
+    "runner tying shoes",          // midpoint 6.5s -> line 2
+    "runner tying shoes",          // midpoint 9.0s -> past end, last line
+  ]);
+  // Never round-robins back to the first line for a later clip.
+  assert.notEqual(plan[3], queries[0]);
+});
+
+test("extracts pause markers into silence gaps and clean text", () => {
+  const { segments, pauses } = extractPauses([
+    "Here is the surprising part [pause]",
+    "It changes how you focus…",
+    "Try it today.",
+  ]);
+  assert.deepEqual(segments, ["Here is the surprising part", "It changes how you focus", "Try it today."]);
+  assert.equal(pauses.length, 3);
+  assert.ok(pauses[0] >= 0.45, "explicit [pause] marker adds a gap");
+  assert.ok(pauses[1] >= 0.3, "trailing ellipsis adds a shorter gap");
+  assert.equal(pauses[2], 0);
+  assert.ok(segments.every((segment) => !/\[pause\]|…/.test(segment)), "markers never reach TTS or subtitles");
+});
+
+test("parses an optional brand-voice blend and ignores single or empty values", () => {
+  assert.deepEqual(parseVoiceBlend("af_heart:0.6,af_bella:0.4"), [{ name: "af_heart", weight: 0.6 }, { name: "af_bella", weight: 0.4 }]);
+  const normalized = parseVoiceBlend("af_heart:3,af_bella:1");
+  assert.equal(normalized[0].weight + normalized[1].weight, 1);
+  assert.equal(parseVoiceBlend(""), null);
+  assert.equal(parseVoiceBlend("af_heart:1"), null, "a single voice is not a blend");
+  assert.equal(parseVoiceBlend(undefined), null);
 });
 
 test("keeps every subtitle cue inside the narration duration", () => {

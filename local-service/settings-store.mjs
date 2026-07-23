@@ -1,6 +1,13 @@
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { validateGeminiApiKey } from "./text-provider.mjs";
+
+// Runtime-written secrets (OAuth tokens, API keys) live in a worker-owned file, NOT .env.local.
+// The Cloudflare/vinext web dev server watches .env.local and hot-restarts (crashing) on every
+// change, so writing tokens there mid-session during OAuth would take the web app down.
+export function secretsFilePath() {
+  return process.env.REELIO_SECRETS_FILE?.trim() || path.resolve(process.env.REELIO_DATA_DIR || ".reelio", "secrets.env");
+}
 
 const ALLOWED_SETTINGS = new Map([
   ["geminiApiKey", "GEMINI_API_KEY"],
@@ -22,6 +29,8 @@ const ALLOWED_SETTINGS = new Map([
   ["tiktokClientSecret", "TIKTOK_CLIENT_SECRET"],
   ["tiktokRefreshToken", "TIKTOK_REFRESH_TOKEN"],
   ["tiktokScopes", "TIKTOK_SCOPES"],
+  ["metaAppId", "META_APP_ID"],
+  ["metaAppSecret", "META_APP_SECRET"],
   ["facebookPageId", "FACEBOOK_PAGE_ID"],
   ["facebookPageAccessToken", "FACEBOOK_PAGE_ACCESS_TOKEN"],
   ["instagramAccountId", "INSTAGRAM_ACCOUNT_ID"],
@@ -45,7 +54,7 @@ export async function saveLocalSettings(input) {
   }
   if (!updates.size) throw new Error("Enter at least one setting to save.");
 
-  const envFile = path.resolve(".env.local");
+  const envFile = secretsFilePath();
   let source = "";
   try { source = await readFile(envFile, "utf8"); } catch (error) { if (error?.code !== "ENOENT") throw error; }
   const lines = source ? source.replace(/\n$/, "").split("\n") : [];
@@ -57,6 +66,7 @@ export async function saveLocalSettings(input) {
     return `${match[1]}=${encodeEnv(updates.get(match[1]))}`;
   });
   for (const [name, value] of updates) if (!written.has(name)) next.push(`${name}=${encodeEnv(value)}`);
+  await mkdir(path.dirname(envFile), { recursive: true });
   await writeFile(envFile, `${next.filter((line, index) => line || index < next.length - 1).join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
   await chmod(envFile, 0o600);
   for (const [name, value] of updates) process.env[name] = value;

@@ -17,6 +17,7 @@
     "healthcheck": "node scripts/healthcheck.mjs",
     "kokoro:setup": "node scripts/setup-kokoro.mjs",
     "voxcpm2:setup": "node scripts/setup-voxcpm2.mjs",
+    "https:setup": "node scripts/setup-https.mjs",
     "check": "npm run lint && npm test",
     "test": "npm run build && node --test tests/*.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .reelio",

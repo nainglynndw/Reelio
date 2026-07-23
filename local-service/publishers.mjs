@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { getTikTokAccessToken } from "./tiktok-oauth.mjs";
 
 export async function publishJob(job, platformIds, onProgress = async () => {}, options = {}) {
@@ -118,7 +118,8 @@ async function uploadYouTube(job, onProgress, forceReupload = false) {
   const verifiedResult = await verified.json().catch(() => ({}));
   const actualPrivacy = verifiedResult.items?.[0]?.status?.privacyStatus ?? result.status?.privacyStatus ?? requestedPrivacy;
   const publicRestricted = requestedPrivacy === "public" && actualPrivacy !== "public";
-  return { status: actualPrivacy === "public" ? "published" : "uploaded", id: result.id, url: `https://youtu.be/${result.id}`, manageUrl: `https://studio.youtube.com/video/${result.id}/edit`, privacy: actualPrivacy, requestedPrivacy, publicRestricted, thumbnail, message: publicRestricted ? "YouTube kept this video private. The Google API project needs a YouTube audit before API uploads can be public." : `YouTube confirmed this video is ${actualPrivacy}.` };
+  const thumbnailNote = thumbnail.status === "failed" ? ` Custom thumbnail was not applied: ${thumbnail.reason}.` : "";
+  return { status: actualPrivacy === "public" ? "published" : "uploaded", id: result.id, url: `https://youtu.be/${result.id}`, manageUrl: `https://studio.youtube.com/video/${result.id}/edit`, privacy: actualPrivacy, requestedPrivacy, publicRestricted, thumbnail: thumbnail.status, message: (publicRestricted ? "YouTube kept this video private. The Google API project needs a YouTube audit before API uploads can be public." : `YouTube confirmed this video is ${actualPrivacy}.`) + thumbnailNote };
 }
 
 async function reconcileExistingYouTubeUpload(token, previous, requestedPrivacy) {
@@ -284,7 +285,22 @@ async function uploadFacebookReel(job, onProgress = async () => {}, forceReuploa
   const finish = await fetchWithTimeout(`${base}?${finishParams}`, { method: "POST" });
   const finishResult = await readApiPayload(finish);
   if (!finish.ok) throw new Error(apiMessage(finishResult, responseFallback(finish, "Facebook Reel publish failed.")));
-  return waitForFacebookReel(version, startResult.video_id, token, onProgress);
+  const published = await waitForFacebookReel(version, startResult.video_id, token, onProgress);
+  // Best-effort custom cover; a failure here must never fail an otherwise-published Reel.
+  const thumbnail = await setFacebookVideoThumbnail(version, startResult.video_id, token, job.assets.thumbnail?.file).catch(() => "failed");
+  return { ...published, thumbnail, message: thumbnail === "failed" ? `${published.message} Custom cover could not be applied; Facebook may be using a video frame.` : published.message };
+}
+
+// Upload a custom cover for a Page video/Reel via the thumbnails edge, marking it the preferred cover.
+async function setFacebookVideoThumbnail(version, videoId, token, file) {
+  if (!file) return "not_available";
+  const image = await readFile(file);
+  const form = new FormData();
+  form.append("access_token", token);
+  form.append("is_preferred", "true");
+  form.append("source", new Blob([image], { type: "image/jpeg" }), "thumbnail.jpg");
+  const response = await fetchWithTimeout(`https://graph.facebook.com/${version}/${videoId}/thumbnails`, { method: "POST", body: form }, 60_000);
+  return response.ok ? "uploaded" : "failed";
 }
 
 async function* facebookUploadBody(file, size, onProgress) {
@@ -340,6 +356,9 @@ async function uploadInstagramReel(job) {
   const videoUrl = `${publicBase}/jobs/${job.id}/assets/final`;
   const copy = postCopy(job, "instagram");
   const createParams = new URLSearchParams({ media_type: "REELS", video_url: videoUrl, caption: `${copy.caption}\n\n${copy.description}`, share_to_feed: "true", access_token: token });
+  // Use the generated thumbnail as the Reel cover. Instagram fetches cover_url from the same public
+  // media host as the video; if it can't fetch it, Meta falls back to a video frame.
+  if (job.assets?.thumbnail) createParams.set("cover_url", `${publicBase}/jobs/${job.id}/assets/thumbnail`);
   const create = await fetchWithTimeout(`https://graph.facebook.com/${version}/${accountId}/media?${createParams}`, { method: "POST" });
   const createResult = await create.json();
   if (!create.ok) throw new Error(apiMessage(createResult, "Instagram container creation failed."));
@@ -379,15 +398,24 @@ function postCopy(job, platformId) {
 }
 
 async function uploadYouTubeThumbnail(token, videoId, file) {
-  if (!file) return "not_available";
-  const size = (await stat(file)).size;
-  const response = await fetchWithTimeout(`https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${encodeURIComponent(videoId)}&uploadType=media`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "image/jpeg", "Content-Length": String(size) },
-    body: createReadStream(file),
-    duplex: "half",
-  }, 120_000);
-  return response.ok ? "uploaded" : "failed";
+  if (!file) return { status: "not_available" };
+  try {
+    const size = (await stat(file)).size;
+    const response = await fetchWithTimeout(`https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${encodeURIComponent(videoId)}&uploadType=media`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "image/jpeg", "Content-Length": String(size) },
+      body: createReadStream(file),
+      duplex: "half",
+    }, 120_000);
+    if (response.ok) return { status: "uploaded" };
+    const detail = await response.json().catch(() => ({}));
+    const reason = /thumbnail|forbidden|unverified|longUploads|ineligible/i.test(JSON.stringify(detail))
+      ? "your YouTube channel must be verified (phone) to set custom thumbnails"
+      : apiMessage(detail, `YouTube rejected the thumbnail (HTTP ${response.status})`);
+    return { status: "failed", reason };
+  } catch (error) {
+    return { status: "failed", reason: error instanceof Error ? error.message : "thumbnail upload failed" };
+  }
 }
 
 function apiMessage(value, fallback) {
