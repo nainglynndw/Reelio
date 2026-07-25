@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { GoogleGenAI } from "@google/genai";
+import { brandVoiceOverrideEnabled } from "./narrators.mjs";
 
 export const GEMINI_TTS_LANGUAGES = [
   "Arabic", "Burmese", "Chinese", "Danish", "Dutch", "English", "Finnish", "French", "German", "Greek",
@@ -32,12 +33,17 @@ export function getGeminiTtsHealth() {
   };
 }
 
-export async function synthesizeGeminiCues({ segments, language, outputDir }) {
+export async function synthesizeGeminiCues({ segments, language, outputDir, voice, delivery }) {
   const config = geminiTtsConfig();
   if (!config.ready) throw new Error("Gemini TTS requires a Gemini API key.");
   if (!GEMINI_TTS_LANGUAGES.includes(language)) throw new Error(`${language} speech is not supported by Gemini TTS.`);
   await mkdir(outputDir, { recursive: true });
   const client = new GoogleGenAI({ apiKey: apiKey() });
+  const selectedConfig = {
+    ...config,
+    voice: selectGeminiTtsVoice(voice),
+    delivery: typeof delivery === "string" ? delivery.trim() : "",
+  };
   const outputs = segments.map((_, index) => path.join(outputDir, `cue-${String(index + 1).padStart(3, "0")}.wav`));
   const concurrency = Math.max(1, Math.min(3, Number(process.env.GEMINI_TTS_CONCURRENCY || 2)));
   let nextIndex = 0;
@@ -45,7 +51,7 @@ export async function synthesizeGeminiCues({ segments, language, outputDir }) {
   async function worker() {
     while (nextIndex < segments.length) {
       const index = nextIndex++;
-      const audio = await generateCue(client, segments[index], language, config);
+      const audio = await generateCue(client, segments[index], language, selectedConfig);
       await writeFile(outputs[index], pcmToWave(audio.pcm, audio.sampleRate, audio.channels));
     }
   }
@@ -53,16 +59,22 @@ export async function synthesizeGeminiCues({ segments, language, outputDir }) {
   return outputs;
 }
 
+export function selectGeminiTtsVoice(personaVoice) {
+  const configured = brandVoiceOverrideEnabled() ? process.env.GEMINI_TTS_VOICE : "";
+  return String(configured || personaVoice || "Puck").trim();
+}
+
 async function generateCue(client, text, language, config) {
   let lastError;
   for (let attempt = 1; attempt <= config.maxRetries; attempt += 1) {
     try {
-      const delivery = language === "Burmese"
-        ? "Use an engaging Burmese presenter voice at a clear, natural medium pace. Articulate every syllable and pause briefly between clauses without sounding slow or rushed."
-        : "Use a lively, energetic knowledge-presenter delivery with clear articulation and a natural medium pace.";
+      const personaDelivery = config.delivery || "Use a lively, energetic knowledge-presenter delivery with clear articulation and a natural medium pace.";
+      const languageDelivery = language === "Burmese"
+        ? "Articulate every Burmese syllable clearly and pause briefly between clauses without sounding mechanical."
+        : `Speak naturally and clearly in ${language}.`;
       const response = await withTimeout(client.interactions.create({
         model: config.model,
-        input: `Synthesize speech only. ${delivery} Speak in ${language}. Do not translate, paraphrase, add, omit, or read these instructions. Speak exactly the transcript after TRANSCRIPT START.\n\nTRANSCRIPT START\n${text}\nTRANSCRIPT END`,
+        input: `Synthesize speech only. ${personaDelivery} ${languageDelivery} Do not translate, paraphrase, add, omit, or read these instructions. Speak exactly the transcript after TRANSCRIPT START.\n\nTRANSCRIPT START\n${text}\nTRANSCRIPT END`,
         response_format: { type: "audio" },
         generation_config: { speech_config: [{ voice: config.voice }] },
       }), config.timeoutMs, `Gemini TTS cue ${attempt}`);

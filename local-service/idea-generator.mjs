@@ -1,11 +1,14 @@
 const FIELD_LABELS = /^(?:idea|topic|hook|visuals?|curiosity gap|payoff|title)\s*:\s*/i;
 
-export const IDEA_SYSTEM_PROMPT = `You suggest subjects for factual knowledge videos and return a short structured brief.
+export const IDEA_SYSTEM_PROMPT = `You develop distinctive subjects for factual knowledge videos and return a compact research-ready brief.
 Write plain text in the requested language, formatted exactly like this:
-- First line: one natural sentence (18-32 words) stating what the video investigates, explains, compares, or demonstrates, including its angle. Frame any surprising or uncertain idea as a question or investigation, never as established fact.
-- Then 2 to 4 lines, each starting with "• ", naming a concrete aspect the video should cover.
-- Make the last "• " line the takeaway: what the viewer should understand or do.
-Do not invent specific statistics, dates, names, quotes, or causal explanations. Do not write the script, narration, or on-screen text. Use no Markdown headings, bold, numbering, JSON, or emoji.`;
+- First line: one natural sentence (18-32 words) with a narrow controlling question, a visible real-world situation, and the specific tension or misconception the video will resolve.
+- Then exactly 4 lines, each starting with "• ".
+- Bullet 1 names the concrete process, comparison, behavior, object, or event the research should establish.
+- Bullet 2 names a real case, demonstration, or counterexample worth finding and verifying.
+- Bullet 3 names the important boundary or competing explanation the video must not ignore.
+- Bullet 4 states a non-obvious viewer payoff: what the viewer should understand, notice, or responsibly do.
+Make the angle specific enough that it could not be reused for an unrelated topic. Frame uncertain ideas as questions or investigations, never as established facts. Do not invent statistics, dates, quotes, causal explanations, or unfamiliar proper names. Do not write narration or on-screen text. Use no headings, bold, numbering, JSON, or emoji.`;
 
 export const NEWS_RESEARCH_SYSTEM_PROMPT = `You are a careful current-news researcher.
 You MUST use Google Search before answering.

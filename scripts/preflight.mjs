@@ -38,7 +38,13 @@ else process.stdout.write(`TTS   ${voxcpm2.model} / ${voxcpm2.device}\n`);
 const text = textProviderConfig();
 if (!text.ready) warnings.push("No hosted text provider is configured: only English fallback scripts are available. Add GEMINI_API_KEY for multilingual generation.");
 else process.stdout.write(`TEXT  ${text.provider} / ${text.model}\n`);
-if (!process.env.PEXELS_API_KEY) warnings.push("Pexels is not configured: Reelio will use generated motion backgrounds.");
+if (!process.env.PEXELS_API_KEY && !process.env.PIXABAY_API_KEY) {
+  warnings.push("No stock provider is configured: Guided Create can use custom local videos or generated motion backgrounds.");
+} else if (!process.env.PEXELS_API_KEY) {
+  warnings.push("Pexels is not configured: Pixabay will provide stock fallback.");
+} else if (!process.env.PIXABAY_API_KEY) {
+  warnings.push("Pixabay is not configured: Pexels will provide stock fallback.");
+}
 if (![process.env.YOUTUBE_ACCESS_TOKEN || process.env.GOOGLE_REFRESH_TOKEN, process.env.TIKTOK_ACCESS_TOKEN, process.env.FACEBOOK_PAGE_ACCESS_TOKEN, process.env.META_USER_ACCESS_TOKEN].some(Boolean)) {
   warnings.push("No publishing credentials are configured: rendered packages remain downloadable and uploads stay disabled by provider checks.");
 }

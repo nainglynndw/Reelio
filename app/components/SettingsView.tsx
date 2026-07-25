@@ -22,6 +22,7 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
   const [geminiKey, setGeminiKey] = useState("");
   const [openRouterKey, setOpenRouterKey] = useState("");
   const [pexelsKey, setPexelsKey] = useState("");
+  const [pixabayKey, setPixabayKey] = useState("");
   const [textModel, setTextModel] = useState("google/gemma-4-31b-it:free");
   const [youtubeClientId, setYoutubeClientId] = useState("");
   const [youtubeClientSecret, setYoutubeClientSecret] = useState("");
@@ -280,8 +281,6 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
         reelioTextProvider: "google",
         geminiTextModel: "gemini-3.5-flash",
         geminiTtsModel: "gemini-3.1-flash-tts-preview",
-        geminiTtsVoice: "Puck",
-        kokoroVoice: "af_heart",
         kokoroSpeed: "1.15",
         openrouterTextModel: textModel,
         openrouterFallbackModel: "google/gemma-4-26b-a4b-it:free",
@@ -289,6 +288,7 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
       if (geminiKey.trim()) payload.geminiApiKey = geminiKey.trim();
       if (openRouterKey.trim()) payload.openrouterApiKey = openRouterKey.trim();
       if (pexelsKey.trim()) payload.pexelsApiKey = pexelsKey.trim();
+      if (pixabayKey.trim()) payload.pixabayApiKey = pixabayKey.trim();
       if (youtubeClientId.trim()) payload.googleClientId = youtubeClientId.trim();
       if (youtubeClientSecret.trim()) payload.googleClientSecret = youtubeClientSecret.trim();
       if (tiktokClientKey.trim()) payload.tiktokClientKey = tiktokClientKey.trim();
@@ -299,7 +299,7 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
       const response = await fetch(`${SERVICE_URL}/settings`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const result = await response.json() as { error?: string };
       if (!response.ok) throw new Error(result.error ?? "Settings could not be saved");
-      setGeminiKey(""); setOpenRouterKey(""); setPexelsKey(""); setYoutubeClientId(""); setYoutubeClientSecret(""); setTiktokClientKey(""); setTiktokClientSecret(""); setMetaAppId(""); setMetaAppSecret(""); setPublicMediaBaseUrl("");
+      setGeminiKey(""); setOpenRouterKey(""); setPexelsKey(""); setPixabayKey(""); setYoutubeClientId(""); setYoutubeClientSecret(""); setTiktokClientKey(""); setTiktokClientSecret(""); setMetaAppId(""); setMetaAppSecret(""); setPublicMediaBaseUrl("");
       setToast("Settings saved securely on this Mac");
       window.setTimeout(checkHealth, 100);
     } catch (error) { setToast(error instanceof Error ? error.message : "Settings could not be saved"); }
@@ -312,18 +312,18 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
         <section className="settings-card wide-settings">
           <div className="settings-title"><div className="provider-icon openrouter"><Sparkles size={20} /></div><div><strong>Google Gemini — text, translation, and multilingual voice</strong><span>Scripts • translation • selectable Gemini TTS narration</span></div><em className={health?.gemini ? "connected" : ""}><i /> {health?.gemini ? "Connected" : "Key required"}</em></div>
           <label className="secret-field"><span>Gemini API key</span><div><input type={showSecret ? "text" : "password"} placeholder={health?.gemini ? "Connected — enter only to replace" : "Paste Google AI Studio API key"} value={geminiKey} onChange={(event) => setGeminiKey(event.target.value)} autoComplete="off" /><button onClick={() => setShowSecret(!showSecret)}>{showSecret ? "Hide" : "Show"}</button></div><small>Used for scripts, translation, current-news grounding, and optional Gemini TTS. Saved only in .env.local.</small></label>
-          <div className="local-model-summary"><span><strong>gemini-3.5-flash</strong><small>Factual master scripts and translation</small></span><span><strong>gemini-3.1-flash-tts-preview</strong><small>Puck voice • multilingual energetic narration</small></span></div>
+          <div className="local-model-summary"><span><strong>gemini-3.5-flash</strong><small>Factual master scripts and translation</small></span><span><strong>gemini-3.1-flash-tts-preview</strong><small>Four matched narrator voices • multilingual delivery</small></span></div>
           <button className="secondary-action" onClick={checkHealth}><RefreshCw size={15} /> Refresh Gemini status</button>
         </section>
         <section className="settings-card wide-settings">
           <div className="settings-title"><div className="provider-icon kokoro"><Mic2 size={20} /></div><div><strong>Kokoro — local English voice</strong><span>Default for English • Gemini remains optional</span></div><em className={health?.kokoro ? "connected" : ""}><i /> {ttsHealth?.ready ? "Ready" : "Setup required"}</em></div>
-          <div className="local-model-summary"><span><strong>Kokoro-82M v1.0</strong><small>af_heart voice • 1.15× energetic pacing</small></span><span><strong>Curated music suite</strong><small>Intro sting • ducked bed • ending lift</small></span></div>
+          <div className="local-model-summary"><span><strong>Kokoro-82M v1.0</strong><small>Four local narrator voices • matched persona pacing</small></span><span><strong>Curated music suite</strong><small>Intro sting • ducked bed • ending lift</small></span></div>
           {ttsHealth?.error && <p className="model-error">{ttsHealth.error}</p>}
           <button className="secondary-action" onClick={checkHealth}><RefreshCw size={15} /> Refresh Kokoro status</button>
         </section>
         <section className="settings-card wide-settings">
           <div className="settings-title"><div className="provider-icon kokoro"><Languages size={20} /></div><div><strong>VoxCPM2 — local multilingual voice</strong><span>Default for non-English • Gemini remains optional</span></div><em className={health?.voxcpm2 ? "connected" : ""}><i /> {voxHealth?.ready ? "Ready" : voxHealth?.loading ? "Downloading" : "Setup required"}</em></div>
-          <div className="local-model-summary"><span><strong>OpenBMB/VoxCPM2</strong><small>30 languages • local Metal acceleration on Apple Silicon</small></span><span><strong>One-time setup</strong><small>Run npm run voxcpm2:setup</small></span></div>
+          <div className="local-model-summary"><span><strong>OpenBMB/VoxCPM2</strong><small>Four narrator personalities • multilingual local delivery</small></span><span><strong>One-time setup</strong><small>Run npm run voxcpm2:setup</small></span></div>
           {voxHealth?.error && <p className="model-error">{voxHealth.error}</p>}
           <button className="secondary-action" onClick={checkHealth}><RefreshCw size={15} /> Refresh VoxCPM2 status</button>
         </section>
@@ -334,8 +334,13 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
           <button className="secondary-action" onClick={checkHealth}><RefreshCw size={15} /> Refresh status</button>
         </section>
         <section className="settings-card">
-          <div className="settings-title"><div className="provider-icon pexels"><Film size={20} /></div><div><strong>Pexels</strong><span>Free licensed stock video</span></div><em className={health?.pexels ? "connected" : ""}><i /> {health?.pexels ? "Connected" : "Motion fallback"}</em></div>
-          <label className="secret-field"><span>API key</span><div><input type="password" placeholder={health?.pexels ? "Connected — enter only to replace" : "Paste Pexels API key"} value={pexelsKey} onChange={(event) => setPexelsKey(event.target.value)} autoComplete="off" /></div><small>Clip credits and license metadata will be kept with each project.</small></label>
+          <div className="settings-title"><div className="provider-icon pexels"><Film size={20} /></div><div><strong>Pexels</strong><span>Free licensed stock video and images</span></div><em className={health?.pexels ? "connected" : ""}><i /> {health?.pexels ? "Configured" : health?.pixabay ? "Pixabay fallback" : "Local only"}</em></div>
+          <label className="secret-field"><span>API key</span><div><input type="password" placeholder={health?.pexels ? "Configured — enter only to replace" : "Paste Pexels API key"} value={pexelsKey} onChange={(event) => setPexelsKey(event.target.value)} autoComplete="off" /></div><small><a href="https://www.pexels.com/api/" target="_blank" rel="noreferrer">Get a free Pexels API key</a>. {health?.pixabay ? "Pixabay remains available if Pexels fails." : "Add Pixabay below for automatic fallback."}</small></label>
+          <button className="secondary-action" onClick={checkHealth}><RefreshCw size={15} /> Refresh status</button>
+        </section>
+        <section className="settings-card">
+          <div className="settings-title"><div className="provider-icon pixabay"><Film size={20} /></div><div><strong>Pixabay</strong><span>Free licensed stock video and images</span></div><em className={health?.pixabay ? "connected" : ""}><i /> {health?.pixabay ? "Configured" : health?.pexels ? "Pexels fallback" : "Local only"}</em></div>
+          <label className="secret-field"><span>API key</span><div><input type="password" placeholder={health?.pixabay ? "Configured — enter only to replace" : "Paste Pixabay API key"} value={pixabayKey} onChange={(event) => setPixabayKey(event.target.value)} autoComplete="off" /></div><small><a href="https://pixabay.com/api/docs/" target="_blank" rel="noreferrer">Get a free Pixabay API key</a>. Searches are cached locally for 24 hours; selected-media credits and license metadata stay with the project.</small></label>
           <button className="secondary-action" onClick={checkHealth}><RefreshCw size={15} /> Refresh status</button>
         </section>
         <section className="settings-card wide-settings" id="publishing-accounts">

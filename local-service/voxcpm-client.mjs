@@ -1,9 +1,12 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { access, mkdir, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { registerJobProcess } from "./job-control.mjs";
+import { brandVoiceOverrideEnabled } from "./narrators.mjs";
 
 const root = () => path.resolve(process.env.REELIO_DATA_DIR || ".reelio", "voxcpm2");
+const DEFAULT_REFERENCE_TEXT = "Clear ideas become memorable when they are spoken with purpose, warmth, and natural rhythm.";
 
 export const VOXCPM2_LANGUAGES = [
   "Arabic", "Burmese", "Chinese", "Danish", "Dutch", "English", "Finnish", "French", "German", "Greek",
@@ -50,31 +53,75 @@ export async function getVoxCpmHealth() {
   };
 }
 
-export async function synthesizeVoxCpmCues({ segments, language, outputDir, voiceDescription }) {
+export async function synthesizeVoxCpmCues({ segments, language, outputDir, voiceDescription, personaId, personaSeed, personaReferenceText }) {
   const config = voxCpmConfig();
   const health = await getVoxCpmHealth();
   if (!health.ready) throw new Error(health.error);
   if (!VOXCPM2_LANGUAGES.includes(language)) throw new Error(`${language} speech is not supported by VoxCPM2.`);
   await mkdir(outputDir, { recursive: true });
+  const personaDirectory = path.join(root(), "personas");
+  await mkdir(personaDirectory, { recursive: true });
   const cues = segments.map((text, index) => ({
     text,
     output: path.join(outputDir, `cue-${String(index + 1).padStart(3, "0")}.wav`),
   }));
-  // A per-topic voice description steers VoxCPM2's tone (calm, energetic, cinematic, …).
-  const description = typeof voiceDescription === "string" && voiceDescription.trim() ? voiceDescription.trim() : config.voiceDescription;
+  // Each persona gets a deterministic designed voice reference; later cues clone it for stable identity.
+  const description = selectVoxCpmVoiceDescription(voiceDescription);
+  const seed = selectVoxCpmSeed(personaSeed);
+  const identity = brandVoiceOverrideEnabled() ? "brand" : safePersonaId(personaId);
+  const referenceText = voxCpmCalibrationText(language, segments, personaReferenceText);
+  const languageId = safeLanguageId(language);
+  const referenceHash = createHash("sha256").update(JSON.stringify({ version: 2, identity, description, seed, language })).digest("hex").slice(0, 12);
+  const personaReference = path.join(personaDirectory, `${identity}-${languageId}-${referenceHash}.wav`);
+  const personaReferenceTranscript = path.join(personaDirectory, `${identity}-${languageId}-${referenceHash}.txt`);
   const manifestPath = path.join(outputDir, "voxcpm2-manifest.json");
   await writeFile(manifestPath, JSON.stringify({
     model: config.modelPath,
     device: config.device,
     cfgValue: config.cfgValue,
     inferenceTimesteps: config.inferenceTimesteps,
-    seed: config.seed,
+    seed,
     voiceDescription: description,
+    personaId: identity,
+    personaReference,
+    personaReferenceTranscript,
+    personaReferenceText: referenceText,
     language,
     cues,
   }), "utf8");
   await run(config.python, [path.resolve("scripts/voxcpm2_tts.py"), manifestPath]);
   return cues.map((cue) => cue.output);
+}
+
+export function selectVoxCpmVoiceDescription(personaDescription) {
+  const configured = brandVoiceOverrideEnabled() ? process.env.VOXCPM_VOICE_DESCRIPTION : "";
+  return String(configured || (typeof personaDescription === "string" ? personaDescription : "") || "A clear, energetic, confident knowledge presenter with a warm natural voice and a medium conversational pace.").trim();
+}
+
+export function selectVoxCpmSeed(personaSeed) {
+  const configured = brandVoiceOverrideEnabled() ? Number(process.env.VOXCPM_SEED) : Number.NaN;
+  const selected = Number.isFinite(configured) ? configured : Number(personaSeed);
+  return Number.isFinite(selected) ? Math.max(0, Math.min(2_147_483_647, Math.trunc(selected))) : 42;
+}
+
+function safePersonaId(value) {
+  const clean = String(value ?? "").toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 32);
+  return clean || "maya";
+}
+
+function safeLanguageId(value) {
+  const clean = String(value ?? "").toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 32);
+  return clean || "speech";
+}
+
+export function voxCpmCalibrationText(language, segments, personaReferenceText) {
+  const selectedLanguageText = segments.find((text) => typeof text === "string" && text.trim())?.trim();
+  const source = String(language).toLowerCase() === "english"
+    ? String(personaReferenceText || selectedLanguageText || DEFAULT_REFERENCE_TEXT).trim()
+    : String(selectedLanguageText || personaReferenceText || DEFAULT_REFERENCE_TEXT).trim();
+  if (source.length <= 260) return source;
+  const shortened = source.slice(0, 259).replace(/\s+\S*$/, "").trim();
+  return `${shortened || source.slice(0, 259)}…`;
 }
 
 function run(command, args) {

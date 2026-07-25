@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { access, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { registerJobProcess } from "./job-control.mjs";
+import { brandVoiceOverrideEnabled } from "./narrators.mjs";
 
 const root = () => path.resolve(process.env.REELIO_DATA_DIR || ".reelio", "kokoro");
 
@@ -50,7 +51,7 @@ export async function getKokoroHealth() {
   };
 }
 
-export async function synthesizeKokoroCues({ segments, outputDir, speed }) {
+export async function synthesizeKokoroCues({ segments, outputDir, speed, voice }) {
   const config = kokoroConfig();
   const health = await getKokoroHealth();
   if (!health.ready) throw new Error(health.error);
@@ -61,18 +62,25 @@ export async function synthesizeKokoroCues({ segments, outputDir, speed }) {
   }));
   // A per-topic speed override lets calmer topics slow down and energetic ones speed up.
   const pacedSpeed = Number.isFinite(speed) ? Math.max(0.8, Math.min(1.4, Number(speed))) : config.speed;
+  const selectedVoice = selectKokoroVoice(voice);
+  const selectedBlend = brandVoiceOverrideEnabled() && process.env.KOKORO_VOICE_BLEND ? config.voiceBlend : null;
   const manifestPath = path.join(outputDir, "kokoro-manifest.json");
   await writeFile(manifestPath, JSON.stringify({
     model: config.modelPath,
     voices: config.voicesPath,
-    voice: config.voice,
-    voiceBlend: config.voiceBlend,
+    voice: selectedVoice,
+    voiceBlend: selectedBlend,
     speed: pacedSpeed,
     language: config.language,
     cues,
   }), "utf8");
   await run(config.python, [path.resolve("scripts/kokoro_tts.py"), manifestPath]);
   return cues.map((cue) => cue.output);
+}
+
+export function selectKokoroVoice(personaVoice) {
+  const configured = brandVoiceOverrideEnabled() ? process.env.KOKORO_VOICE : "";
+  return String(configured || personaVoice || "af_heart").trim();
 }
 
 function run(command, args) {

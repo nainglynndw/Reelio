@@ -8,25 +8,29 @@ import {
   CircleHelp,
   FolderOpen,
   Library,
+  ListChecks,
   Menu,
   MoreHorizontal,
   Plus,
   Search,
   Settings,
-  Sparkles,
   WandSparkles,
+  Wrench,
   X,
   Zap,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { AutomationsView } from "./components/AutomationsView";
+import { BrandKitView } from "./components/BrandKitView";
 import { CreateView } from "./components/CreateView";
+import { GuidedCreateView } from "./components/GuidedCreateView";
 import { LibraryView } from "./components/LibraryView";
 import { SettingsView } from "./components/SettingsView";
+import { ToolsView } from "./components/ToolsView";
 import { VideoDetailView } from "./components/VideoDetailView";
 import { defaultTtsEngine } from "./lib/languages";
 import { SERVICE_URL } from "./lib/service";
-import type { LocalJob, TtsEngine, View } from "./lib/types";
+import type { BrandKit, LocalJob, NarratorId, ScriptStyle, TtsEngine, View, VisualSelection, VisualTheme } from "./lib/types";
 
 export default function Home() {
   const [view, setView] = useState<View>("create");
@@ -36,6 +40,7 @@ export default function Home() {
   const [duration, setDuration] = useState("90 sec");
   const [language, setLanguage] = useState("English");
   const [ttsEngine, setTtsEngine] = useState<TtsEngine>("kokoro");
+  const [quickNarratorId, setQuickNarratorId] = useState<NarratorId>("maya");
   const [subtitleLanguage, setSubtitleLanguage] = useState("English");
   const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>([
     "youtube",
@@ -56,20 +61,28 @@ export default function Home() {
   const [completedJob, setCompletedJob] = useState<LocalJob | null>(null);
   const [selectedJob, setSelectedJob] = useState<LocalJob | null>(null);
   const [serviceReady, setServiceReady] = useState(false);
-  const [automationOn, setAutomationOn] = useState(false);
+  const [brandKit, setBrandKit] = useState<BrandKit | null>(null);
   const [toast, setToast] = useState("");
 
   useEffect(() => {
+    let restoringActiveJob = false;
     fetch(`${SERVICE_URL}/health`).then((response) => setServiceReady(response.ok)).catch(() => setServiceReady(false));
+    fetch(`${SERVICE_URL}/brand-kit`).then((response) => response.json()).then((value: { brandKit?: BrandKit }) => {
+      if (!value.brandKit) return;
+      setBrandKit(value.brandKit);
+      if (!restoringActiveJob) setQuickNarratorId(value.brandKit.defaultNarratorId);
+    }).catch(() => {});
     fetch(`${SERVICE_URL}/jobs`).then((response) => response.json()).then((value: { jobs?: LocalJob[] }) => {
       const jobs = value.jobs ?? [];
       const active = jobs.find((job) => job.state === "running" || job.state === "queued");
       if (active) {
+        restoringActiveJob = true;
         setPrompt(active.request.prompt);
         setCategory(active.request.category);
         setDuration(active.request.duration);
         setLanguage(active.request.language);
         setTtsEngine(active.request.ttsEngine ?? defaultTtsEngine(active.request.language));
+        setQuickNarratorId(active.request.narratorId ?? "maya");
         setSubtitleLanguage(active.request.subtitleLanguage);
         setGenerating(true);
         setActiveJobId(active.id);
@@ -180,7 +193,7 @@ export default function Home() {
     }
   }
 
-  async function startGeneration() {
+  async function startGeneration(approvedScript?: string, visualThemes?: VisualTheme[], visualSelections?: VisualSelection[], scriptStyle?: ScriptStyle, narratorId?: NarratorId) {
     if (generating || activeJobId) {
       setToast("A video is already generating. Wait for it to finish.");
       return;
@@ -198,7 +211,20 @@ export default function Home() {
       const response = await fetch(`${SERVICE_URL}/jobs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, category, duration, language, ttsEngine, subtitleLanguage, platforms: selectedPlatforms }),
+        body: JSON.stringify({
+          prompt,
+          category,
+          duration,
+          language,
+          ttsEngine,
+          subtitleLanguage,
+          platforms: selectedPlatforms,
+          ...(scriptStyle ? { scriptStyle } : {}),
+          narratorId: narratorId ?? quickNarratorId,
+          ...(typeof approvedScript === "string" && approvedScript.trim() ? { approvedScript } : {}),
+          ...(visualThemes?.length ? { visualThemes } : {}),
+          ...(visualSelections?.length ? { visualSelections } : {}),
+        }),
       });
       const result = await response.json() as { error?: string; job?: LocalJob };
       if (!response.ok || !result.job) throw new Error(result.error ?? "Local renderer unavailable");
@@ -258,20 +284,21 @@ export default function Home() {
     openJob(job);
   }
 
-  function beginNewVideo() {
+  function beginNewVideo(target: "create" | "guided-create" = "create") {
     if (generating || activeJobId) {
       setView("create");
       setMobileNav(false);
       setToast("A video is generating. Finish it before starting another.");
       return;
     }
-    setView("create");
+    setView(target);
     setMobileNav(false);
     setPrompt("");
     setCategory("Curious science");
     setDuration("90 sec");
     setLanguage("English");
     setTtsEngine("kokoro");
+    setQuickNarratorId(brandKit?.defaultNarratorId ?? "maya");
     setSubtitleLanguage("English");
     setSelectedPlatforms(["youtube", "tiktok", "facebook", "instagram"]);
     setSuggesting(false);
@@ -291,7 +318,7 @@ export default function Home() {
     <main className="app-shell">
       <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
         <div className="brand-row">
-          <div className="brand-mark"><Sparkles size={18} strokeWidth={2.4} /></div>
+          <div className="brand-mark" aria-hidden="true" />
           <div>
             <strong>Reelio</strong>
             <span>AI Video Studio</span>
@@ -299,19 +326,21 @@ export default function Home() {
           <button className="mobile-close" onClick={() => setMobileNav(false)} aria-label="Close menu"><X size={19} /></button>
         </div>
 
-        <button className="new-video-button" onClick={beginNewVideo}>
+        <button className="new-video-button" onClick={() => beginNewVideo()}>
           <Plus size={18} /> New video
         </button>
 
         <nav aria-label="Main navigation">
-          <NavButton icon={<WandSparkles size={18} />} label="Create" active={view === "create"} onClick={() => { setView("create"); setMobileNav(false); }} />
+          <NavButton icon={<WandSparkles size={18} />} label="Quick Create" active={view === "create"} onClick={() => { setView("create"); setMobileNav(false); }} />
+          <NavButton icon={<ListChecks size={18} />} label="Guided Create" active={view === "guided-create"} badge="New" onClick={() => { setView("guided-create"); setMobileNav(false); }} />
+          <NavButton icon={<Wrench size={18} />} label="Tools" active={view === "tools"} badge="New" onClick={() => { setView("tools"); setMobileNav(false); }} />
           <NavButton icon={<Library size={18} />} label="Video library" active={view === "library" || view === "detail"} onClick={() => { setView("library"); setMobileNav(false); }} />
           <NavButton icon={<CalendarClock size={18} />} label="Automations" active={view === "automations"} badge="Live" onClick={() => { setView("automations"); setMobileNav(false); }} />
         </nav>
 
         <div className="sidebar-section-label">Workspace</div>
         <nav aria-label="Workspace navigation">
-          <NavButton icon={<FolderOpen size={18} />} label="Brand assets" onClick={() => setToast("Brand assets are planned for the next build")} />
+          <NavButton icon={<FolderOpen size={18} />} label="Brand Kit" active={view === "brand-kit"} onClick={() => { setView("brand-kit"); setMobileNav(false); }} />
           <NavButton icon={<Archive size={18} />} label="Archive" onClick={() => setToast("Archive is empty")} />
         </nav>
 
@@ -358,6 +387,8 @@ export default function Home() {
             setTtsEngine={(value) => setTtsEngine(value as TtsEngine)}
             subtitleLanguage={subtitleLanguage}
             setSubtitleLanguage={setSubtitleLanguage}
+            narratorId={quickNarratorId}
+            setNarratorId={setQuickNarratorId}
             selectedPlatforms={selectedPlatforms}
             togglePlatform={togglePlatform}
             ideaFocus={ideaFocus}
@@ -378,9 +409,48 @@ export default function Home() {
             stoppingGeneration={stoppingGeneration}
           />
         )}
-        {view === "library" && <LibraryView onNewVideo={beginNewVideo} onOpenJob={openJob} onOpenSettings={() => { setView("settings"); window.setTimeout(() => document.getElementById("publishing-accounts")?.scrollIntoView({ behavior: "smooth" }), 50); }} setToast={setToast} />}
+        {view === "guided-create" && (
+          <GuidedCreateView
+            key={`guided-${brandKit?.defaultNarratorId ?? "maya"}`}
+            prompt={prompt}
+            setPrompt={setPrompt}
+            category={category}
+            setCategory={setCategory}
+            duration={duration}
+            setDuration={setDuration}
+            language={language}
+            setLanguage={changeSpeechLanguage}
+            ttsEngine={ttsEngine}
+            setTtsEngine={(value) => setTtsEngine(value as TtsEngine)}
+            subtitleLanguage={subtitleLanguage}
+            setSubtitleLanguage={setSubtitleLanguage}
+            selectedPlatforms={selectedPlatforms}
+            togglePlatform={togglePlatform}
+            ideaFocus={ideaFocus}
+            setIdeaFocus={setIdeaFocus}
+            suggesting={suggesting}
+            suggestIdea={suggestIdea}
+            newsLoading={newsLoading}
+            getLatestNews={getLatestNews}
+            generating={generating}
+            stoppingGeneration={stoppingGeneration}
+            renderProgress={renderProgress}
+            renderMessage={renderMessage}
+            completedJob={completedJob}
+            startGeneration={startGeneration}
+            stopGeneration={stopGeneration}
+            openJob={openJob}
+            onCreateAnother={() => beginNewVideo("guided-create")}
+            onOpenSettings={() => setView("settings")}
+            setToast={setToast}
+            defaultNarratorId={brandKit?.defaultNarratorId ?? "maya"}
+          />
+        )}
+        {view === "library" && <LibraryView onNewVideo={() => beginNewVideo()} onOpenJob={openJob} onOpenSettings={() => { setView("settings"); window.setTimeout(() => document.getElementById("publishing-accounts")?.scrollIntoView({ behavior: "smooth" }), 50); }} setToast={setToast} />}
         {view === "detail" && selectedJob && <VideoDetailView key={selectedJob.id} job={selectedJob} generationLocked={Boolean(activeJobId) || generating} onBack={() => setView("library")} onOpenSettings={() => { setView("settings"); window.setTimeout(() => document.getElementById("publishing-accounts")?.scrollIntoView({ behavior: "smooth" }), 50); }} onJobCreated={openCreatedJob} setToast={setToast} />}
-        {view === "automations" && <AutomationsView automationOn={automationOn} setAutomationOn={setAutomationOn} setToast={setToast} />}
+        {view === "automations" && <AutomationsView setToast={setToast} onOpenJob={openJob} onOpenSettings={() => { setView("settings"); window.setTimeout(() => document.getElementById("publishing-accounts")?.scrollIntoView({ behavior: "smooth" }), 50); }} />}
+        {view === "tools" && <ToolsView setToast={setToast} onOpenSettings={() => setView("settings")} />}
+        {view === "brand-kit" && <BrandKitView setToast={setToast} onBrandKitChange={setBrandKit} />}
         {view === "settings" && <SettingsView setToast={setToast} />}
       </section>
 
@@ -398,10 +468,13 @@ function NavButton({ icon, label, active, count, badge, onClick }: { icon: React
 }
 
 function viewLabel(view: View) {
-  if (view === "create") return "New video";
+  if (view === "create") return "Quick Create";
+  if (view === "guided-create") return "Guided Create";
+  if (view === "tools") return "Tools";
   if (view === "library") return "Video library";
   if (view === "detail") return "Video detail";
   if (view === "automations") return "Automations";
+  if (view === "brand-kit") return "Brand Kit";
   return "Settings";
 }
 

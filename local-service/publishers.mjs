@@ -6,21 +6,27 @@ export async function publishJob(job, platformIds, onProgress = async () => {}, 
   if (!job.assets?.final?.file) throw new Error("Final video is not available.");
   const results = {};
   const reuploadPlatforms = new Set(options.reuploadPlatforms ?? []);
-  for (const platformId of platformIds) {
+  const uploaders = {
+    youtube: (progress, forceReupload) => uploadYouTube(job, progress, forceReupload),
+    tiktok: (progress, forceReupload) => uploadTikTokInbox(job, progress, forceReupload),
+    facebook: (progress, forceReupload) => uploadFacebookReel(job, progress, forceReupload),
+    instagram: () => uploadInstagramReel(job),
+    ...(options.uploaders ?? {}),
+  };
+  await Promise.all(platformIds.map(async (platformId) => {
     try {
       const mediaIssue = publishingMediaIssue(job, platformId);
       if (mediaIssue) throw new Error(mediaIssue);
       await onProgress(platformId, { status: "starting", progress: 0, message: `Starting ${platformId} upload…` });
-      if (platformId === "youtube") results.youtube = await uploadYouTube(job, (result) => onProgress(platformId, result), reuploadPlatforms.has(platformId));
-      else if (platformId === "tiktok") results.tiktok = await uploadTikTokInbox(job, (result) => onProgress(platformId, result), reuploadPlatforms.has(platformId));
-      else if (platformId === "facebook") results.facebook = await uploadFacebookReel(job, (result) => onProgress(platformId, result), reuploadPlatforms.has(platformId));
-      else if (platformId === "instagram") results.instagram = await uploadInstagramReel(job);
-      else results[platformId] = { status: "unsupported", message: "No connector is registered for this platform." };
+      const uploader = uploaders[platformId];
+      results[platformId] = uploader
+        ? await uploader((result) => onProgress(platformId, result), reuploadPlatforms.has(platformId))
+        : { status: "unsupported", message: "No connector is registered for this platform." };
     } catch (error) {
       results[platformId] = { status: "failed", message: error instanceof Error ? error.message : String(error) };
     }
     await onProgress(platformId, results[platformId]);
-  }
+  }));
   return results;
 }
 

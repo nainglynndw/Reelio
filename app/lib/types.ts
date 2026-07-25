@@ -1,7 +1,110 @@
-export type View = "create" | "library" | "detail" | "automations" | "settings";
+export type View = "create" | "guided-create" | "tools" | "library" | "detail" | "automations" | "brand-kit" | "settings";
 export type TtsEngine = "kokoro" | "gemini" | "voxcpm2";
+export type ScriptStyle = "clear-explainer" | "story-led" | "problem-solution" | "myth-fact" | "list-format" | "question-led" | "case-study" | "compare-contrast" | "timeline" | "practical-guide";
+export type NarratorId = "maya" | "theo" | "nova" | "ellis";
+export type StockProvider = "pexels" | "pixabay";
+export type VisualTheme = { title: string; startSegment: number; endSegment: number; queries: string[] };
+export type VisualCandidate = { id: string; provider: StockProvider; providerLabel: string; type: "video" | "image"; previewUrl: string; mediaUrl: string; sourceUrl: string; creator: string; query: string };
+export type VisualSelection = {
+  themeIndex: number;
+  mode: "media" | "motion" | "custom";
+  provider?: StockProvider;
+  mediaId?: string;
+  mediaType?: "video" | "image";
+  mediaUrl?: string;
+  sourceUrl?: string;
+  creator?: string;
+  query?: string;
+  uploadId?: string;
+  fileName?: string;
+};
 export type PlatformPostCopy = { title: string; caption: string; description: string; tags: string[] };
+export type BrandAssetKind = "logo" | "intro" | "outro" | "music";
+export type BrandAsset = {
+  id: string;
+  kind: BrandAssetKind;
+  name: string;
+  bytes: number;
+  mediaType: string;
+  durationSeconds?: number;
+  width?: number;
+  height?: number;
+  createdAt: string;
+  url: string;
+};
+export type BrandKit = {
+  version: number;
+  enabled: boolean;
+  name: string;
+  primaryColor: string;
+  accentColor: string;
+  fontFamily: string;
+  captionStyle: "bold" | "classic" | "minimal" | "kinetic";
+  logoPosition: "top-left" | "top-right" | "bottom-left" | "bottom-right";
+  logoOpacity: number;
+  brandVoice: string;
+  ctaText: string;
+  socialHandle: string;
+  website: string;
+  defaultNarratorId: NarratorId;
+  assets: Record<BrandAssetKind, BrandAsset | null>;
+  createdAt: string;
+  updatedAt: string;
+};
 export type PublishResult = { status: string; id?: string; message?: string; url?: string; manageUrl?: string; publishId?: string; postIds?: string[]; tiktokStatus?: string; progress?: number; processingProgress?: number; uploadedBytes?: number; bytesUploaded?: number; bytesTotal?: number; chunksUploaded?: number; chunksTotal?: number; etaSeconds?: number; processingStartedAt?: string; privacy?: string; requestedPrivacy?: string; publicRestricted?: boolean };
+export type JobTrigger = { type: "manual" | "agent" | "cron" | "automation"; automationId?: string; automationName?: string; calendarEntryId?: string; scheduledFor?: string; briefSource?: "suggested" | "news"; objective?: string; expression?: string; timezone?: string; publishMode?: "review" | "auto" };
+export type Automation = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  mode: "calendar" | "quick";
+  briefSource: "suggested" | "news";
+  topicFocus?: string;
+  color: string;
+  cron: string | null;
+  timezone: string;
+  startDate?: string;
+  endDate?: string;
+  weekdays?: number[];
+  times?: string[];
+  template: LocalJob["request"];
+  publishMode: "review" | "auto";
+  requireReview: boolean;
+  lastRunAt?: string | null;
+  nextRunAt?: string | null;
+  lastJobId?: string | null;
+  activeJobId?: string | null;
+  lastStatus?: string;
+  lastError?: string | null;
+  runCount?: number;
+  briefPlanning?: boolean;
+  calendarEntryCount?: number;
+  calendarBriefsReady?: number;
+  createdAt: string;
+  updatedAt: string;
+};
+export type CalendarEntry = {
+  id: string;
+  automationId: string;
+  automationName: string;
+  color: string;
+  date: string;
+  time: string;
+  timezone: string;
+  briefSource: "suggested" | "news";
+  topicFocus?: string;
+  brief?: string | null;
+  title: string;
+  briefState: "pending" | "generating" | "ready" | "failed";
+  state: "planned" | "queued" | "running" | "ready" | "published" | "published_with_issues" | "failed" | "stopped" | "rejected" | "skipped";
+  jobId?: string | null;
+  error?: string | null;
+  provider?: string;
+  model?: string;
+  sources?: Array<{ title: string; url: string }>;
+  createdAt: string;
+  updatedAt: string;
+};
 
 export type LocalJob = {
   id: string;
@@ -10,7 +113,7 @@ export type LocalJob = {
   progress: number;
   message: string;
   error?: string;
-  request: { prompt: string; category: string; duration: string; language: string; ttsEngine?: TtsEngine; subtitleLanguage: string; platforms: string[] };
+  request: { prompt: string; category: string; duration: string; language: string; ttsEngine?: TtsEngine; subtitleLanguage: string; platforms: string[]; scriptStyle?: ScriptStyle; narratorId?: NarratorId; approvedScript?: string; visualThemes?: VisualTheme[]; visualSelections?: VisualSelection[]; brandKit?: BrandKit | null };
   assets?: Record<string, { name: string; url: string; downloadUrl: string }> | null;
   metadata?: {
     title?: string;
@@ -22,7 +125,12 @@ export type LocalJob = {
     narrationLanguage?: string;
     subtitleLanguage?: string;
     voiceProvider?: string;
+    narrator?: string;
+    narratorTone?: string;
     visualSource?: string;
+    scriptStyle?: string;
+    visualThemes?: VisualTheme[];
+    visualPlanningMode?: string;
     platformCopy?: Record<string, PlatformPostCopy>;
     retentionPreflight?: {
       score?: number;
@@ -33,12 +141,14 @@ export type LocalJob = {
     };
   };
   publishResults?: Record<string, PublishResult>;
+  publishState?: string;
+  trigger?: JobTrigger;
   reviewState?: "pending" | "approved" | "rejected";
   reviewedAt?: string;
   createdAt: string;
 };
 
-export type ProviderHealth = { gemini: boolean; geminiTts: boolean; kokoro: boolean; voxcpm2: boolean; openrouter: boolean; pexels: boolean; youtube: boolean; tiktok: boolean; facebook: boolean; instagram: boolean };
+export type ProviderHealth = { gemini: boolean; geminiTts: boolean; kokoro: boolean; voxcpm2: boolean; openrouter: boolean; pexels: boolean; pixabay: boolean; youtube: boolean; tiktok: boolean; facebook: boolean; instagram: boolean };
 export type TtsHealth = { enabled?: boolean; ready?: boolean; modelLoaded?: boolean; loading?: boolean; provider?: string; model?: string; device?: string; error?: string | null };
 export type TextHealth = { ready?: boolean; provider?: string; preferred?: string; model?: string };
 export type YouTubeStatus = { connected: boolean; configured: boolean; hasAuthorization?: boolean; channelId?: string; channelTitle?: string; message?: string; redirectUri?: string };
@@ -56,3 +166,17 @@ export type Platform = {
 export type PublishingAccountReadiness = { ready: boolean; setupComplete: boolean; accountName?: string; reason: string };
 export type PublishingReadiness = { accounts: Record<string, PublishingAccountReadiness> };
 export type PlatformEligibility = { eligible: boolean; setupRequired: boolean; reason: string; requirements: string[] };
+
+export type ToolAsset = { name: string; bytes?: number; type?: string; url: string; downloadUrl: string };
+export type ToolJob = {
+  id: string;
+  state: "queued" | "running" | "completed" | "failed" | "stopped";
+  stage: string;
+  progress: number;
+  message: string;
+  error?: string;
+  request: { toolId: string; inputs: Record<string, { uploadId?: string; toolJobId?: string; assetKey?: string }>; options: Record<string, string | number | boolean> };
+  assets?: Record<string, ToolAsset> | null;
+  metadata?: Record<string, string | number | boolean>;
+  createdAt: string;
+};

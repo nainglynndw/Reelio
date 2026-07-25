@@ -29,13 +29,13 @@ export function textProviderConfig() {
   };
 }
 
-export async function generateText({ system, user, maxTokens = 700, temperature = 0.7 }) {
+export async function generateText({ system, user, maxTokens = 700, temperature = 0.7, thinkingLevel = "medium" }) {
   const config = textProviderConfig();
   if (config.provider === "studio") return null;
 
   if (config.provider === "google") {
     try {
-      return await callGemini({ system, user, maxTokens, temperature, model: config.model });
+      return await callGemini({ system, user, maxTokens, temperature, thinkingLevel, model: config.model });
     } catch (primaryError) {
       if (process.env.OPENROUTER_API_KEY) {
         try {
@@ -66,23 +66,26 @@ export async function generateText({ system, user, maxTokens = 700, temperature 
   return null;
 }
 
-export async function generateGroundedText({ system, user, maxTokens = 320, temperature = 0.35, recentDays = 7 }) {
+export async function generateGroundedText({ system, user, maxTokens = 320, temperature = 0.35, recentDays = 7, thinkingLevel = "medium" }) {
   const key = geminiApiKey();
   if (!key) return null;
+  const hasTimeWindow = Number.isFinite(recentDays);
   const end = new Date();
-  const start = new Date(end.getTime() - Math.max(1, recentDays) * 86_400_000);
+  const start = hasTimeWindow ? new Date(end.getTime() - Math.max(1, recentDays) * 86_400_000) : null;
   const toSecondPrecision = (date) => date.toISOString().replace(/\.\d{3}Z$/, "Z");
   return callGemini({
     system,
     user,
     maxTokens,
     temperature,
+    thinkingLevel,
     model: process.env.GEMINI_TEXT_MODEL ?? DEFAULT_GEMINI_TEXT_MODEL,
-    searchWindow: { startTime: toSecondPrecision(start), endTime: toSecondPrecision(end) },
+    grounded: true,
+    searchWindow: start ? { startTime: toSecondPrecision(start), endTime: toSecondPrecision(end) } : null,
   });
 }
 
-async function callGemini({ system, user, maxTokens, temperature, model, searchWindow }) {
+async function callGemini({ system, user, maxTokens, temperature, thinkingLevel = "medium", model, grounded = false, searchWindow }) {
   const client = new GoogleGenAI({ apiKey: geminiApiKey() });
   const response = await withTimeout(client.models.generateContent({
     model,
@@ -91,8 +94,8 @@ async function callGemini({ system, user, maxTokens, temperature, model, searchW
       systemInstruction: system,
       maxOutputTokens: Math.min(16_384, Math.max(8_192, maxTokens * 6)),
       temperature,
-      thinkingConfig: { thinkingLevel: "low" },
-      ...(searchWindow ? { tools: [{ googleSearch: { timeRangeFilter: searchWindow } }] } : {}),
+      thinkingConfig: { thinkingLevel: normalizeThinkingLevel(thinkingLevel) },
+      ...(grounded ? { tools: [{ googleSearch: searchWindow ? { timeRangeFilter: searchWindow } : {} }] } : {}),
     },
   }), Number(process.env.GEMINI_TIMEOUT_MS ?? 90_000), "Google Gemini text generation");
   const text = typeof response.text === "string" ? response.text : "";
@@ -104,6 +107,11 @@ async function callGemini({ system, user, maxTokens, temperature, model, searchW
     .filter((source, index, all) => all.findIndex((item) => item.url === source.url) === index)
     .slice(0, 5);
   return { text: text.trim(), provider: "google", model, sources };
+}
+
+export function normalizeThinkingLevel(value) {
+  const level = String(value ?? "medium").trim().toLowerCase();
+  return ["minimal", "low", "medium", "high"].includes(level) ? level : "medium";
 }
 
 async function callOpenRouter({ system, user, maxTokens, temperature, model }) {

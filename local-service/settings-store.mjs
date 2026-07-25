@@ -21,6 +21,7 @@ const ALLOWED_SETTINGS = new Map([
   ["openrouterTextModel", "OPENROUTER_TEXT_MODEL"],
   ["openrouterFallbackModel", "OPENROUTER_FALLBACK_MODEL"],
   ["pexelsApiKey", "PEXELS_API_KEY"],
+  ["pixabayApiKey", "PIXABAY_API_KEY"],
   ["googleClientId", "GOOGLE_CLIENT_ID"],
   ["googleClientSecret", "GOOGLE_CLIENT_SECRET"],
   ["googleRefreshToken", "GOOGLE_REFRESH_TOKEN"],

@@ -1,0 +1,23 @@
+{
+  "name": "Reelio — AI Knowledge Video Studio",
+  "short_name": "Reelio",
+  "description": "Create retention-first multilingual video packages locally.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f8f7fb",
+  "theme_color": "#6f4bf3",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -21,9 +21,10 @@ import {
   Zap,
 } from "lucide-react";
 import { speechLanguages, ttsEngineOptions, voiceLanguages } from "../lib/languages";
+import { narrators } from "../lib/narrators";
 import { platforms } from "../lib/platforms";
 import { SERVICE_URL } from "../lib/service";
-import type { LocalJob, TtsEngine } from "../lib/types";
+import type { LocalJob, NarratorId, TtsEngine } from "../lib/types";
 import { PlatformLogo, SelectField } from "./common";
 
 export const workflowSteps = [
@@ -56,6 +57,8 @@ export function CreateView(props: {
   setTtsEngine: (value: string) => void;
   subtitleLanguage: string;
   setSubtitleLanguage: (value: string) => void;
+  narratorId: NarratorId;
+  setNarratorId: (value: NarratorId) => void;
   selectedPlatforms: string[];
   togglePlatform: (id: string) => void;
   ideaFocus: string;
@@ -140,8 +143,8 @@ export function CreateView(props: {
           <div className="assistant-note">
             <div className="assistant-avatar"><Bot size={17} /></div>
             <div>
-              <strong>I’ll ask before I guess.</strong>
-              <p>If the topic, audience, or goal is unclear, the script workflow pauses for one focused question.</p>
+              <strong>Research-backed script generation</strong>
+              <p>Generation uses several AI passes and API tokens. With Gemini configured, Reelio searches grounded sources before planning and drafting.</p>
             </div>
           </div>
 
@@ -152,6 +155,7 @@ export function CreateView(props: {
               <SelectField icon={<Clock3 size={16} />} label="Target duration" value={props.duration} onChange={props.setDuration} options={["60 sec", "75 sec", "90 sec", "2 min", "Up to 3 min"]} />
               <SelectField icon={<Mic2 size={16} />} label="Speech / transcript language" value={props.language} onChange={props.setLanguage} options={speechLanguages} />
               <SelectField icon={<Zap size={16} />} label="Voice engine" value={props.ttsEngine} onChange={props.setTtsEngine} options={ttsEngineOptions(props.language)} />
+              <SelectField icon={<Mic2 size={16} />} label="Narrator" value={props.narratorId} onChange={(value) => props.setNarratorId(value as NarratorId)} options={narrators.map((narrator) => ({ value: narrator.id, label: `${narrator.name} · ${narrator.role}` }))} />
               <SelectField icon={<Languages size={16} />} label="Subtitle language" value={props.subtitleLanguage} onChange={props.setSubtitleLanguage} options={voiceLanguages} />
             </div>
           </div>
@@ -197,7 +201,7 @@ export function CreateView(props: {
             </div>
           )}
 
-          <button className={`generate-button ${props.generating ? "stop-generation-button" : ""}`} onClick={props.generating ? props.stopGeneration : props.startGeneration} disabled={props.stoppingGeneration}>
+          <button className={`generate-button ${props.generating ? "stop-generation-button" : ""}`} onClick={() => void (props.generating ? props.stopGeneration() : props.startGeneration())} disabled={props.stoppingGeneration}>
             {props.generating ? (props.stoppingGeneration ? <RefreshCw size={18} className="spin" /> : <X size={18} />) : <WandSparkles size={18} />}
             {props.generating ? (props.stoppingGeneration ? "Stopping and unloading…" : "Stop & unload models") : "Generate video package"}
             {!props.generating && <span>⌘ ↵</span>}

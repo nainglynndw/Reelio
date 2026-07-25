@@ -1,7 +1,7 @@
 import { copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-const emptyState = { jobs: [], automations: [] };
+const emptyState = { jobs: [], automations: [], calendarEntries: [], toolJobs: [], toolInputs: [], brandKit: null };
 let state = structuredClone(emptyState);
 let root;
 let statePath;
@@ -30,6 +30,10 @@ export async function initializeStore() {
     }
   }
   validateState(state);
+  state.toolJobs ??= [];
+  state.toolInputs ??= [];
+  state.calendarEntries ??= [];
+  state.brandKit ??= null;
   const recoveredJobIds = [];
   for (const job of state.jobs) {
     if (job.state === "running" || job.state === "queued") {
@@ -41,8 +45,26 @@ export async function initializeStore() {
       recoveredJobIds.push(job.id);
     }
   }
+  const recoveredToolJobIds = [];
+  for (const job of state.toolJobs) {
+    if (job.state === "running" || job.state === "queued") {
+      job.state = "queued";
+      job.stage = "recovery";
+      job.message = "Recovered after local worker restart";
+      job.error = null;
+      job.updatedAt = new Date().toISOString();
+      recoveredToolJobIds.push(job.id);
+    }
+  }
+  for (const entry of state.calendarEntries) {
+    if (entry.briefState === "generating") {
+      entry.briefState = "pending";
+      entry.error = null;
+      entry.updatedAt = new Date().toISOString();
+    }
+  }
   await persist();
-  return { recoveredJobIds, root };
+  return { recoveredJobIds, recoveredToolJobIds, root };
 }
 
 export function getRoot() {
@@ -79,6 +101,60 @@ export async function removeJob(id) {
   return removed;
 }
 
+export function listToolJobs() {
+  return [...state.toolJobs].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function getToolJob(id) {
+  return state.toolJobs.find((job) => job.id === id) ?? null;
+}
+
+export async function addToolJob(job) {
+  state.toolJobs.push(job);
+  await persist();
+  return job;
+}
+
+export async function patchToolJob(id, patch) {
+  const job = getToolJob(id);
+  if (!job) return null;
+  Object.assign(job, patch, { updatedAt: new Date().toISOString() });
+  await persist();
+  return job;
+}
+
+export async function removeToolJob(id) {
+  const index = state.toolJobs.findIndex((job) => job.id === id);
+  if (index < 0) return null;
+  const [removed] = state.toolJobs.splice(index, 1);
+  await persist({ mirrorBackup: true });
+  return removed;
+}
+
+export function listToolInputs() {
+  return [...state.toolInputs].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function getToolInput(id) {
+  return state.toolInputs.find((input) => input.id === id) ?? null;
+}
+
+export async function addToolInput(input) {
+  state.toolInputs.push(input);
+  await persist();
+  return input;
+}
+
+export function getBrandKit() {
+  return state.brandKit ? structuredClone(state.brandKit) : null;
+}
+
+export async function setBrandKit(brandKit) {
+  state.brandKit = brandKit ? structuredClone(brandKit) : null;
+  await persist();
+  return getBrandKit();
+}
+
 export function listAutomations() {
   return [...state.automations].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
@@ -99,6 +175,45 @@ export async function patchAutomation(id, patch) {
   Object.assign(automation, patch, { updatedAt: new Date().toISOString() });
   await persist();
   return automation;
+}
+
+export async function removeAutomation(id) {
+  const index = state.automations.findIndex((automation) => automation.id === id);
+  if (index < 0) return null;
+  const [removed] = state.automations.splice(index, 1);
+  await persist({ mirrorBackup: true });
+  return removed;
+}
+
+export function listCalendarEntries() {
+  return [...state.calendarEntries].sort((a, b) => `${a.date}T${a.time}`.localeCompare(`${b.date}T${b.time}`));
+}
+
+export function getCalendarEntry(id) {
+  return state.calendarEntries.find((entry) => entry.id === id) ?? null;
+}
+
+export async function replaceAutomationCalendarEntries(automationId, entries) {
+  state.calendarEntries = state.calendarEntries.filter((entry) => entry.automationId !== automationId);
+  state.calendarEntries.push(...entries);
+  await persist();
+  return entries;
+}
+
+export async function patchCalendarEntry(id, patch) {
+  const entry = getCalendarEntry(id);
+  if (!entry) return null;
+  Object.assign(entry, patch, { updatedAt: new Date().toISOString() });
+  await persist();
+  return entry;
+}
+
+export async function removeAutomationCalendarEntries(automationId) {
+  const removed = state.calendarEntries.filter((entry) => entry.automationId === automationId);
+  if (!removed.length) return [];
+  state.calendarEntries = state.calendarEntries.filter((entry) => entry.automationId !== automationId);
+  await persist({ mirrorBackup: true });
+  return removed;
 }
 
 async function persist({ mirrorBackup = false } = {}) {
@@ -124,7 +239,10 @@ async function readState(file) {
 }
 
 function validateState(value) {
-  if (!value || typeof value !== "object" || !Array.isArray(value.jobs) || !Array.isArray(value.automations)) {
+  if (!value || typeof value !== "object" || !Array.isArray(value.jobs) || !Array.isArray(value.automations)
+    || (value.calendarEntries != null && !Array.isArray(value.calendarEntries))
+    || (value.toolJobs != null && !Array.isArray(value.toolJobs)) || (value.toolInputs != null && !Array.isArray(value.toolInputs))
+    || (value.brandKit != null && (typeof value.brandKit !== "object" || Array.isArray(value.brandKit)))) {
     throw new Error("Reelio state file has an invalid shape.");
   }
 }
