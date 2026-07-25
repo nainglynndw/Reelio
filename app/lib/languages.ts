@@ -14,7 +14,8 @@ export function defaultTtsEngine(language: string): TtsEngine {
 
 export function ttsEngineOptions(language: string): Array<{ value: TtsEngine; label: string }> {
   if (language === "English") return [
-    { value: "kokoro", label: "Kokoro — local" },
+    { value: "kokoro", label: "Kokoro — local, fastest" },
+    { value: "voxcpm2", label: "VoxCPM2 — local, most expressive" },
     { value: "gemini", label: "Gemini TTS — cloud" },
   ];
   const options: Array<{ value: TtsEngine; label: string }> = [{ value: "voxcpm2", label: "VoxCPM2 — local" }];

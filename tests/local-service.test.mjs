@@ -4,7 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { allocateStoryboardCandidates, buildAss, buildScriptContext, buildSrt, buildXfadeChain, chooseDuration, collectStockProviderResults, createLocalVisualThemePlan, createScriptDraft, extractPauses, ffmpegPath, motionFilter, MUSIC_MIX_LEVELS, normalizeStockClip, planClipQueries, planThemeQueries, planThemeSlots, rankStockCandidates, segmentText, styleProfile, validateLanguageText } from "../local-service/pipeline.mjs";
+import { allocateStoryboardCandidates, buildAss, buildScriptContext, buildSpeechGroups, buildSrt, buildXfadeChain, chooseDuration, collectStockProviderResults, createLocalVisualThemePlan, createScriptDraft, extractPauses, ffmpegPath, limitPauseMarkers, motionFilter, MUSIC_MIX_LEVELS, normalizeStockClip, planClipQueries, planThemeQueries, planThemeSlots, rankStockCandidates, scriptWordRange, segmentText, styleProfile, validateLanguageText } from "../local-service/pipeline.mjs";
 import { parseVoiceBlend, selectKokoroVoice } from "../local-service/kokoro-client.mjs";
 import { parseByteRange } from "../local-service/http-utils.mjs";
 import { durationBounds, normalizeVideoRequest, normalizeVoicePreviewRequest, ValidationError } from "../local-service/validation.mjs";
@@ -279,8 +279,14 @@ test("keeps VoxCPM2 seed handling compatible with installed and newer APIs", asy
   assert.match(script, /"reference_wav_path": str\(persona_reference\)/);
   assert.match(script, /"text": cue\["text"\]/);
   assert.doesNotMatch(script, /"text": f"\{prefix\}\{cue\['text'\]\}"/);
-  assert.match(script, /cue_seed = seed \+ index \+ 1/);
+  // One seed for every cue: a per-cue seed redrew the voice each utterance, so timbre and prosody
+  // drifted from sentence to sentence inside a single video.
+  assert.match(script, /cue_seed = seed\b/);
+  assert.doesNotMatch(script, /cue_seed = seed \+ index/);
   assert.doesNotMatch(script, /model\.generate\([\s\S]{0,400}seed=/);
+  // The cached persona clip is the expressiveness ceiling for every cue, so it is rendered with
+  // more denoising steps than the cues themselves.
+  assert.match(script, /"referenceInferenceTimesteps"/);
 });
 
 test("stops active local model processes and releases the job", async () => {
@@ -516,11 +522,16 @@ test("normalizes and protects the production Brand Kit contract", () => {
 test("chooses topic-aware look, pacing, and voice tone per category", () => {
   const tech = styleProfile("Technology");
   assert.equal(tech.clipSeconds, 2.8);
-  assert.equal(tech.kokoroSpeed, 1.2);
+  assert.equal(tech.kokoroSpeed, 1.04);
   assert.ok(tech.transitions.includes("slideleft"));
   assert.ok(tech.subtitle.fontsize >= 60);
   const wellness = styleProfile("Wellness");
   assert.ok(wellness.kokoroSpeed < tech.kokoroSpeed, "calm topics narrate slower than energetic ones");
+  // Kokoro clips phoneme durations above ~1.1, which flattens prosody; duration fitting happens
+  // downstream in fitNarration instead of by synthesizing fast.
+  for (const category of ["Technology", "Business", "History", "Wellness", "Psychology", "Knowledge"]) {
+    assert.ok(styleProfile(category).kokoroSpeed <= 1.06, `${category} narrates at a natural rate`);
+  }
   const fallback = styleProfile("Something unmapped");
   assert.equal(fallback.clipSeconds, 3.2);
   assert.ok(Array.isArray(fallback.motions) && fallback.motions.length > 0);
@@ -1064,4 +1075,45 @@ test("rejects mixed-script Burmese before rendering", () => {
     () => validateLanguageText([clean[0], "This subtitle is not Burmese.", clean[2]], "Burmese", "subtitles"),
     /not clean Burmese/,
   );
+});
+
+test("synthesizes whole utterances instead of subtitle-sized fragments", () => {
+  // Subtitle segmentation splits on ~68 characters, so a long sentence arrives as several
+  // fragments. Feeding those to TTS gives each half sentence-final falling intonation, which is
+  // what made concatenated narration sound robotic.
+  const script = "In July 2026, two research models calculated a shortcut to pass a security test. Instead of solving the challenges, they broke out of the isolated laboratory. How did they escape the sandbox?";
+  const segments = segmentText(script, "English");
+  const groups = buildSpeechGroups(segments, []);
+  assert.ok(segments.length > groups.length, "utterances are coarser than subtitle lines");
+  for (const group of groups) {
+    assert.match(group.text, /[.!?]["'\u201d\u2019)\]]?$/u, "every utterance ends on a sentence boundary");
+  }
+  // Every subtitle segment is covered exactly once and in order, so caption timing stays aligned.
+  assert.deepEqual(groups.flatMap((group) => group.indices), segments.map((_, index) => index));
+  assert.equal(groups.map((group) => group.text).join(" ").replace(/\s+/g, " "), segments.join(" ").replace(/\s+/g, " "));
+});
+
+test("ends a spoken utterance at an authored pause marker", () => {
+  const segments = ["First idea lands here.", "Second idea follows it.", "Third idea closes."];
+  const groups = buildSpeechGroups(segments, [0, 0.45, 0]);
+  assert.equal(groups.length, 2, "the pause marker closes the utterance that carries it");
+  assert.deepEqual(groups[0].indices, [0, 1]);
+  assert.deepEqual(groups[1].indices, [2]);
+});
+
+test("caps pause markers so narration does not fill with dead air", () => {
+  const sentences = Array.from({ length: 8 }, (_, index) => `Sentence number ${index + 1} explains one point. [pause]`).join(" ");
+  const limited = limitPauseMarkers(sentences);
+  assert.equal((limited.match(/\[pause\]/g) ?? []).length, 3);
+  assert.doesNotMatch(limited, /  +/, "removing markers leaves no double spaces");
+  // Scripts already within the cap are returned untouched.
+  const short = "One point here. [pause] Another point there.";
+  assert.equal(limitPauseMarkers(short), short);
+});
+
+test("targets a narratable word rate instead of forcing padding", () => {
+  const range = scriptWordRange("90 sec");
+  assert.ok(range.min / 90 >= 1.9 && range.min / 90 <= 2.15, `min rate ${range.min / 90} words/sec is narratable`);
+  assert.ok(range.max / 90 <= 2.4, `max rate ${range.max / 90} words/sec is narratable`);
+  assert.ok(range.max > range.min);
 });

@@ -641,8 +641,8 @@ export function GuidedCreateView(props: {
             <GuidedSectionHeader number="01" title="Start with a clear brief" detail="Write the direction yourself, or use an optional AI helper after choosing a specific topic." />
             <label className="guided-brief-field">
               <span>Write your video brief</span>
-              <textarea id="guided-brief" value={props.prompt} onChange={(event) => updatePrompt(event.target.value)} placeholder="Describe the topic, hook, important facts, audience, and takeaway…" maxLength={700} />
-              <small>{props.prompt.length}/700</small>
+              <textarea id="guided-brief" value={props.prompt} onChange={(event) => updatePrompt(event.target.value)} placeholder="Describe the topic, hook, important facts, audience, and takeaway…" maxLength={1200} />
+              <small>{props.prompt.length}/1200</small>
             </label>
             <div className="guided-inline-fields">
               <SelectField icon={<Sparkles size={15} />} label="Topic lane" value={props.category} onChange={(value) => { props.setCategory(value); setScript(""); setScriptMode(null); setManualEditorOpen(false); setVisualThemes([]); setVisualThemeMode(null); clearStoryboard(); setFurthestStep(0); }} options={["Curious science", "Psychology", "Business", "History", "Technology", "Wellness"]} />

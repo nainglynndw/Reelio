@@ -22,8 +22,14 @@ export function voxCpmConfig() {
     python: path.resolve(process.env.VOXCPM_PYTHON || path.join(base, "venv", "bin", "python3")),
     modelPath: path.resolve(process.env.VOXCPM_MODEL_PATH || path.join(base, "models", "VoxCPM2")),
     device: process.env.VOXCPM_DEVICE || "auto",
+    // Measured on this install: cue F0 range is ~4.3-4.9 semitones and neither cfg_value (1.4/1.7/2.0)
+    // nor inference_timesteps (10/30) moves it, while generation time is dominated by the language
+    // model rather than the diffusion steps. Keep the cheap cue settings and spend the extra steps
+    // only on the persona reference, which is generated once and cached.
     cfgValue: Number(process.env.VOXCPM_CFG_VALUE || 2),
     inferenceTimesteps: Number(process.env.VOXCPM_INFERENCE_TIMESTEPS || 10),
+    referenceCfgValue: Number(process.env.VOXCPM_REFERENCE_CFG_VALUE || 2),
+    referenceInferenceTimesteps: Number(process.env.VOXCPM_REFERENCE_INFERENCE_TIMESTEPS || 40),
     seed: Number(process.env.VOXCPM_SEED || 42),
     voiceDescription: process.env.VOXCPM_VOICE_DESCRIPTION || "A clear, energetic, confident knowledge presenter with a warm natural voice and a medium conversational pace.",
   };
@@ -71,7 +77,11 @@ export async function synthesizeVoxCpmCues({ segments, language, outputDir, voic
   const identity = brandVoiceOverrideEnabled() ? "brand" : safePersonaId(personaId);
   const referenceText = voxCpmCalibrationText(language, segments, personaReferenceText);
   const languageId = safeLanguageId(language);
-  const referenceHash = createHash("sha256").update(JSON.stringify({ version: 2, identity, description, seed, language })).digest("hex").slice(0, 12);
+  // Key the cached clip on the persona's own passage so editing it regenerates the reference instead
+  // of reusing a clip recorded from the old text. Non-English references are taken from the script,
+  // which differs per video, so those key on a stable marker to keep one voice across renders.
+  const referenceKey = referenceText === String(personaReferenceText ?? "").trim() ? referenceText : "script-derived";
+  const referenceHash = createHash("sha256").update(JSON.stringify({ version: 3, identity, description, seed, language, referenceKey })).digest("hex").slice(0, 12);
   const personaReference = path.join(personaDirectory, `${identity}-${languageId}-${referenceHash}.wav`);
   const personaReferenceTranscript = path.join(personaDirectory, `${identity}-${languageId}-${referenceHash}.txt`);
   const manifestPath = path.join(outputDir, "voxcpm2-manifest.json");
@@ -80,6 +90,8 @@ export async function synthesizeVoxCpmCues({ segments, language, outputDir, voic
     device: config.device,
     cfgValue: config.cfgValue,
     inferenceTimesteps: config.inferenceTimesteps,
+    referenceCfgValue: config.referenceCfgValue,
+    referenceInferenceTimesteps: config.referenceInferenceTimesteps,
     seed,
     voiceDescription: description,
     personaId: identity,

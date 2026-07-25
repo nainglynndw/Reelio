@@ -44,7 +44,7 @@ import { getVoxCpmHealth } from "./voxcpm-client.mjs";
 import { getSttHealth } from "./stt-client.mjs";
 import { generateGroundedText, generateText, textProviderConfig, validateGeminiApiKey } from "./text-provider.mjs";
 import { saveLocalSettings, secretsFilePath } from "./settings-store.mjs";
-import { IDEA_SYSTEM_PROMPT, NEWS_RESEARCH_SYSTEM_PROMPT, NEWS_SYSTEM_PROMPT, normalizeIdeaOutput, studioIdea } from "./idea-generator.mjs";
+import { BRIEF_MAX_CHARS, IDEA_SYSTEM_PROMPT, NEWS_RESEARCH_SYSTEM_PROMPT, NEWS_SYSTEM_PROMPT, normalizeIdeaOutput, studioIdea } from "./idea-generator.mjs";
 import { assertJobActive, JobStoppedError, runWithJobControl, stopAllJobExecutions, stopJobExecution } from "./job-control.mjs";
 import { finishYouTubeOAuth, startYouTubeOAuth, youtubeConnectionStatus, YouTubeOAuthError, youtubeOAuthConfig } from "./youtube-oauth.mjs";
 import { finishTikTokOAuth, startTikTokOAuth, tiktokConnectionStatus, TikTokOAuthError, tiktokOAuthConfig } from "./tiktok-oauth.mjs";
@@ -653,7 +653,7 @@ const requestHandler = async (request, response) => {
       const body = await readJsonBody(request, maxBodyBytes);
       const patch = {};
       if (body.brief != null) {
-        patch.brief = cleanText(body.brief, "Calendar brief", 3, 700);
+        patch.brief = cleanText(body.brief, "Calendar brief", 3, BRIEF_MAX_CHARS);
         patch.title = firstLine(patch.brief);
         patch.briefState = "ready";
         patch.error = null;

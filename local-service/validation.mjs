@@ -1,5 +1,6 @@
 import { DEFAULT_SCRIPT_STYLE, SCRIPT_STYLES } from "./script-styles.mjs";
 import { DEFAULT_NARRATOR_ID, NARRATORS } from "./narrators.mjs";
+import { BRIEF_MAX_CHARS } from "./idea-generator.mjs";
 
 const platformIds = new Set(["youtube", "tiktok", "facebook", "instagram"]);
 const speechLanguages = new Set([
@@ -22,7 +23,7 @@ export class ValidationError extends Error {
 
 export function normalizeVideoRequest(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ValidationError("Request body must be an object.");
-  const prompt = cleanText(value.prompt, "Video idea", 3, 700);
+  const prompt = cleanText(value.prompt, "Video idea", 3, BRIEF_MAX_CHARS);
   const category = cleanText(value.category ?? "Knowledge", "Category", 1, 80);
   const duration = cleanText(value.duration ?? "60–90 sec", "Duration", 1, 32);
   durationBounds(duration);
@@ -30,7 +31,7 @@ export function normalizeVideoRequest(value) {
   if (!speechLanguages.has(language)) throw new ValidationError(`Unsupported speech language: ${language}.`);
   const ttsEngine = String(value.ttsEngine ?? defaultTtsEngine(language)).toLowerCase().trim();
   if (!ttsEngines.has(ttsEngine)) throw new ValidationError(`Unsupported TTS engine: ${ttsEngine}.`);
-  if (language === "English" && !["kokoro", "gemini"].includes(ttsEngine)) throw new ValidationError("English speech supports Kokoro or Gemini TTS.");
+  if (language === "English" && !["kokoro", "voxcpm2", "gemini"].includes(ttsEngine)) throw new ValidationError("English speech supports Kokoro, VoxCPM2, or Gemini TTS.");
   if (language !== "English" && !["voxcpm2", "gemini"].includes(ttsEngine)) throw new ValidationError("Non-English speech supports VoxCPM2 or Gemini TTS.");
   if (ttsEngine === "gemini" && !geminiSpeechLanguages.has(language)) throw new ValidationError(`${language} speech is not supported by Gemini TTS; choose VoxCPM2.`);
   const subtitleLanguage = cleanText(value.subtitleLanguage ?? "English", "Subtitle language", 2, 40);
@@ -58,7 +59,7 @@ export function normalizeVoicePreviewRequest(value) {
   validateVoicePreviewLanguageText(text, language);
   const ttsEngine = String(value.ttsEngine ?? defaultTtsEngine(language)).toLowerCase().trim();
   if (!ttsEngines.has(ttsEngine)) throw new ValidationError(`Unsupported TTS engine: ${ttsEngine}.`);
-  if (language === "English" && !["kokoro", "gemini"].includes(ttsEngine)) throw new ValidationError("English speech supports Kokoro or Gemini TTS.");
+  if (language === "English" && !["kokoro", "voxcpm2", "gemini"].includes(ttsEngine)) throw new ValidationError("English speech supports Kokoro, VoxCPM2, or Gemini TTS.");
   if (language !== "English" && !["voxcpm2", "gemini"].includes(ttsEngine)) throw new ValidationError("Non-English speech supports VoxCPM2 or Gemini TTS.");
   if (ttsEngine === "gemini" && !geminiSpeechLanguages.has(language)) throw new ValidationError(`${language} speech is not supported by Gemini TTS; choose VoxCPM2.`);
   const narratorId = String(value.narratorId ?? DEFAULT_NARRATOR_ID).trim();

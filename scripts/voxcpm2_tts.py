@@ -39,10 +39,12 @@ def main():
     else:
         persona_reference_text = requested_reference_text
         set_seed(seed)
+        # Every cue clones this clip, so its expressiveness is the ceiling for the whole render.
+        # Spend extra denoising steps here once; the result is cached on disk per persona.
         reference_generation = {
             "text": f"{prefix}{persona_reference_text}",
-            "cfg_value": float(manifest.get("cfgValue", 2.0)),
-            "inference_timesteps": int(manifest.get("inferenceTimesteps", 10)),
+            "cfg_value": float(manifest.get("referenceCfgValue", manifest.get("cfgValue", 2.0))),
+            "inference_timesteps": int(manifest.get("referenceInferenceTimesteps", 40)),
         }
         if supports_seed:
             reference_generation["seed"] = seed
@@ -55,7 +57,9 @@ def main():
         os.replace(temporary_transcript, persona_reference_transcript)
 
     for index, cue in enumerate(manifest["cues"]):
-        cue_seed = seed + index + 1
+        # One seed for the whole render. A per-cue seed (seed + index) redrew the voice on every
+        # utterance, so timbre and prosody drifted from sentence to sentence within one video.
+        cue_seed = seed
         set_seed(cue_seed)
         generation = {
             # The reference already carries the persona. Keep target speech pure so an

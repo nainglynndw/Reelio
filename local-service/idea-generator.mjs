@@ -51,7 +51,28 @@ export function normalizeIdeaOutput(value) {
       return isBullet ? `• ${cleaned}` : cleaned;
     })
     .filter(Boolean);
-  return lines.join("\n").slice(0, 700);
+  return clampBriefLength(lines);
+}
+
+export const BRIEF_MAX_CHARS = 1200;
+
+// The prompts ask for an angle line plus four bullets, which regularly exceeds 700 characters. The
+// old hard slice cut mid-word and usually removed the last bullet — the viewer payoff — so the
+// script writer never saw it. Drop whole lines instead, keeping the angle line and as many bullets
+// as fit.
+function clampBriefLength(lines, max = BRIEF_MAX_CHARS) {
+  const kept = [];
+  let length = 0;
+  for (const line of lines) {
+    const addition = kept.length ? line.length + 1 : line.length;
+    if (kept.length && length + addition > max) break;
+    kept.push(line);
+    length += addition;
+  }
+  const joined = kept.join("\n");
+  if (joined.length <= max) return joined;
+  // A single over-long first line still has to fit; cut it on a word boundary.
+  return joined.slice(0, max).replace(/\s+\S*$/, "").trim();
 }
 
 export function studioIdea(category) {
