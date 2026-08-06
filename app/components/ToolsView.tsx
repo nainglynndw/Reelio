@@ -23,11 +23,11 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { defaultTtsEngine, speechLanguages, ttsEngineOptions, voiceLanguages } from "../lib/languages";
 import { narrators } from "../lib/narrators";
-import { SERVICE_URL } from "../lib/service";
+import { serviceFetch, SERVICE_URL } from "../lib/service";
 import type { NarratorId, ToolJob, TtsEngine } from "../lib/types";
 
-type ToolId = "chop" | "download-media" | "extract-audio" | "extract-subtitles" | "extract-web-captions" | "transcribe" | "translate" | "speech-synthesis" | "video-synthesis";
-type InputKind = "video" | "audio" | "media" | "subtitles";
+type ToolId = "chop" | "download-media" | "extract-audio" | "extract-subtitles" | "extract-web-captions" | "long-video-analyze" | "long-video-render" | "transcribe" | "translate" | "speech-synthesis" | "video-synthesis";
+type InputKind = "video" | "audio" | "media" | "subtitles" | "analysis";
 type ToolDefinition = {
   id: ToolId;
   name: string;
@@ -40,7 +40,7 @@ type ToolDefinition = {
 };
 type ToolHealth = {
   providers?: { gemini?: boolean; geminiTts?: boolean; openrouter?: boolean; kokoro?: boolean; voxcpm2?: boolean };
-  stt?: { ready?: boolean };
+  stt?: { ready?: boolean; provider?: string; model?: string; error?: string | null };
   webMedia?: { ready?: boolean };
   tts?: { ready?: boolean };
   voxcpm2?: { ready?: boolean };
@@ -61,7 +61,12 @@ const tools: ToolDefinition[] = [
   { id: "extract-audio", name: "Generate audio", short: "Extract a soundtrack", description: "Create a clean WAV or M4A audio file from any video.", aiLabel: "No AI", aiKind: "none", icon: <FileAudio size={20} />, inputs: [{ id: "video", label: "Video", accepts: "video/*", artifactTypes: ["video"] }] },
   { id: "extract-subtitles", name: "Extract subtitle track", short: "Embedded captions to SRT", description: "Copy an existing text subtitle track from a video without speech recognition.", aiLabel: "No AI", aiKind: "none", icon: <FileText size={20} />, inputs: [{ id: "video", label: "Video with subtitles", accepts: "video/*", artifactTypes: ["video"] }] },
   { id: "extract-web-captions", name: "Extract captions from link", short: "Existing web captions to SRT", description: "Save existing manual or automatic captions from a supported public link.", aiLabel: "No AI · setup", aiKind: "utility", icon: <FileText size={20} />, inputs: [] },
-  { id: "transcribe", name: "Generate subtitle", short: "Speech to timed text", description: "Transcribe audio or video into an SRT file and plain transcript.", aiLabel: "Local AI", aiKind: "local", icon: <FileText size={20} />, inputs: [{ id: "media", label: "Audio or video", accepts: "audio/*,video/*", artifactTypes: ["audio", "video"] }] },
+  { id: "long-video-analyze", name: "Find short highlights", short: "Long video to review plan", description: "Transcribe licensed footage and use Gemini Flash-Lite to find coherent candidate moments.", aiLabel: "Gemini AI", aiKind: "cloud", icon: <Sparkles size={20} />, inputs: [{ id: "media", label: "Long video", accepts: "video/*", artifactTypes: ["video"] }] },
+  { id: "long-video-render", name: "Render reviewed shorts", short: "Highlight plan to vertical MP4s", description: "Render all selected candidates from a highlight analysis as captioned vertical videos.", aiLabel: "No AI", aiKind: "none", icon: <Film size={20} />, inputs: [
+    { id: "media", label: "Long video", accepts: "video/*", artifactTypes: ["video"] },
+    { id: "analysis", label: "Highlight analysis", accepts: ".json,application/json", artifactTypes: ["analysis"] },
+  ] },
+  { id: "transcribe", name: "Generate subtitle", short: "Speech to timed text", description: "Transcribe audio or video into an SRT file and plain transcript.", aiLabel: "AI transcription", aiKind: "mixed", icon: <FileText size={20} />, inputs: [{ id: "media", label: "Audio or video", accepts: "audio/*,video/*", artifactTypes: ["audio", "video"] }] },
   { id: "translate", name: "Translate", short: "Preserve subtitle timing", description: "Translate every subtitle cue into a selected language.", aiLabel: "API key", aiKind: "cloud", icon: <Languages size={20} />, inputs: [{ id: "subtitles", label: "SRT or VTT subtitles", accepts: ".srt,.vtt,text/vtt,application/x-subrip", artifactTypes: ["subtitles"] }] },
   { id: "speech-synthesis", name: "Speech synthesis", short: "Subtitles to narration", description: "Create timed speech using Kokoro, VoxCPM2, or Gemini.", aiLabel: "AI voice", aiKind: "mixed", icon: <Mic2 size={20} />, inputs: [{ id: "subtitles", label: "Translated subtitles", accepts: ".srt,.vtt,text/vtt,application/x-subrip", artifactTypes: ["subtitles"] }] },
   { id: "video-synthesis", name: "Video synthesis", short: "Build the language version", description: "Combine source video, translated audio, and translated subtitles.", aiLabel: "No AI", aiKind: "none", icon: <Video size={20} />, inputs: [
@@ -71,7 +76,12 @@ const tools: ToolDefinition[] = [
   ] },
 ];
 
-export function ToolsView({ setToast, onOpenSettings }: { setToast: (value: string) => void; onOpenSettings: () => void }) {
+export function ToolsView({ authenticated, onRequireAuthentication, setToast, onOpenSettings }: {
+  authenticated: boolean;
+  onRequireAuthentication: () => boolean;
+  setToast: (value: string) => void;
+  onOpenSettings: () => void;
+}) {
   const [selectedId, setSelectedId] = useState<ToolId>("chop");
   const [jobs, setJobs] = useState<ToolJob[]>([]);
   const [files, setFiles] = useState<Partial<Record<InputKind, File>>>({});
@@ -93,13 +103,23 @@ export function ToolsView({ setToast, onOpenSettings }: { setToast: (value: stri
   const [speechSpeed, setSpeechSpeed] = useState("1.1");
   const [burnSubtitles, setBurnSubtitles] = useState(true);
   const [applyBrandKit, setApplyBrandKit] = useState(true);
+  const [longRightsConfirmed, setLongRightsConfirmed] = useState(false);
+  const [longCloudConsent, setLongCloudConsent] = useState(false);
+  const [longMaxClips, setLongMaxClips] = useState("5");
+  const [longMinSeconds, setLongMinSeconds] = useState("25");
+  const [longMaxSeconds, setLongMaxSeconds] = useState("60");
+  const [longCaptions, setLongCaptions] = useState(true);
+  const [longMirror, setLongMirror] = useState(false);
+  const [longTransitions, setLongTransitions] = useState(false);
+  const [longRemixConfirmed, setLongRemixConfirmed] = useState(false);
   const selected = tools.find((tool) => tool.id === selectedId)!;
   const aiRequirement = toolAiRequirement(selectedId, ttsEngine, health);
   const runUnavailable = aiRequirement.ready === false;
 
   const refreshJobs = async () => {
+    if (!authenticated) return void onRequireAuthentication();
     try {
-      const response = await fetch(`${SERVICE_URL}/tool-jobs`);
+      const response = await serviceFetch(`${SERVICE_URL}/tool-jobs`);
       const result = await response.json() as { jobs?: ToolJob[] };
       if (response.ok) setJobs(result.jobs ?? []);
     } catch {}
@@ -107,22 +127,32 @@ export function ToolsView({ setToast, onOpenSettings }: { setToast: (value: stri
 
   useEffect(() => {
     let cancelled = false;
-    const load = () => fetch(`${SERVICE_URL}/tool-jobs`).then((response) => response.json()).then((result: { jobs?: ToolJob[] }) => {
+    const load = () => serviceFetch(`${SERVICE_URL}/tool-jobs`).then((response) => response.json()).then((result: { jobs?: ToolJob[] }) => {
       if (!cancelled) setJobs(result.jobs ?? []);
     }).catch(() => {});
-    const loadHealth = () => fetch(`${SERVICE_URL}/health`).then((response) => response.json()).then((result: ToolHealth) => {
+    const loadHealth = () => serviceFetch(`${SERVICE_URL}/health`).then((response) => response.json()).then((result: ToolHealth) => {
       if (!cancelled) setHealth(result);
     }).catch(() => {});
-    const kickoff = window.setTimeout(load, 0);
+    const kickoff = authenticated ? window.setTimeout(load, 0) : undefined;
     const healthKickoff = window.setTimeout(loadHealth, 0);
-    const timer = window.setInterval(load, 1200);
-    return () => { cancelled = true; window.clearTimeout(kickoff); window.clearTimeout(healthKickoff); window.clearInterval(timer); };
-  }, []);
+    const timer = authenticated ? window.setInterval(load, 1200) : undefined;
+    const clear = !authenticated ? window.setTimeout(() => setJobs([]), 0) : undefined;
+    return () => {
+      cancelled = true;
+      if (kickoff !== undefined) window.clearTimeout(kickoff);
+      window.clearTimeout(healthKickoff);
+      if (timer !== undefined) window.clearInterval(timer);
+      if (clear !== undefined) window.clearTimeout(clear);
+    };
+  }, [authenticated]);
 
   function selectTool(toolId: ToolId) {
     setSelectedId(toolId);
     setFiles({});
     setArtifactRefs({});
+    setLongRightsConfirmed(false);
+    setLongCloudConsent(false);
+    setLongRemixConfirmed(false);
   }
 
   const reusableAssets = useMemo(() => jobs.flatMap((job) => job.state === "completed" && job.assets
@@ -140,6 +170,7 @@ export function ToolsView({ setToast, onOpenSettings }: { setToast: (value: stri
   }
 
   async function runTool() {
+    if (!authenticated) return void onRequireAuthentication();
     setSubmitting(true);
     try {
       const inputs: Record<string, { uploadId?: string; toolJobId?: string; assetKey?: string }> = {};
@@ -147,7 +178,7 @@ export function ToolsView({ setToast, onOpenSettings }: { setToast: (value: stri
         const file = files[input.id];
         const artifact = artifactRefs[input.id];
         if (file) {
-          const response = await fetch(`${SERVICE_URL}/tool-inputs`, {
+          const response = await serviceFetch(`${SERVICE_URL}/tool-inputs`, {
             method: "POST",
             headers: { "Content-Type": file.type || "application/octet-stream", "X-File-Name": encodeURIComponent(file.name) },
             body: file,
@@ -162,7 +193,7 @@ export function ToolsView({ setToast, onOpenSettings }: { setToast: (value: stri
           throw new Error(`Choose ${input.label.toLowerCase()}.`);
         }
       }
-      const response = await fetch(`${SERVICE_URL}/tool-jobs`, {
+      const response = await serviceFetch(`${SERVICE_URL}/tool-jobs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ toolId: selected.id, inputs, options: toolOptions(selected.id) }),
@@ -186,6 +217,8 @@ export function ToolsView({ setToast, onOpenSettings }: { setToast: (value: stri
     if (toolId === "extract-audio") return { format: audioFormat };
     if (toolId === "extract-subtitles") return { trackIndex: Math.max(0, Number(subtitleTrack) - 1) };
     if (toolId === "extract-web-captions") return { url: captionUrl, language: captionLanguage };
+    if (toolId === "long-video-analyze") return { rightsConfirmed: longRightsConfirmed, cloudConsent: longCloudConsent, sourceLanguage, maxClips: Number(longMaxClips), minClipSeconds: Number(longMinSeconds), maxClipSeconds: Number(longMaxSeconds) };
+    if (toolId === "long-video-render") return { rightsConfirmed: longRightsConfirmed, remixConfirmed: longRemixConfirmed, captions: longCaptions, mirror: longMirror, transitions: longTransitions, applyBrandKit };
     if (toolId === "transcribe") return { sourceLanguage };
     if (toolId === "translate") return { targetLanguage };
     if (toolId === "speech-synthesis") return { language: speechLanguage, ttsEngine, narratorId, speed: Number(speechSpeed) };
@@ -193,8 +226,9 @@ export function ToolsView({ setToast, onOpenSettings }: { setToast: (value: stri
   }
 
   async function jobAction(job: ToolJob, action: "stop" | "retry" | "delete") {
+    if (!authenticated) return void onRequireAuthentication();
     try {
-      const response = await fetch(`${SERVICE_URL}/tool-jobs/${job.id}${action === "retry" ? "/retry" : action === "stop" ? "/stop" : ""}`, { method: action === "delete" ? "DELETE" : "POST" });
+      const response = await serviceFetch(`${SERVICE_URL}/tool-jobs/${job.id}${action === "retry" ? "/retry" : action === "stop" ? "/stop" : ""}`, { method: action === "delete" ? "DELETE" : "POST" });
       const result = await response.json() as { job?: ToolJob; error?: string };
       if (!response.ok) throw new Error(result.error ?? `Could not ${action} tool job`);
       if (action === "delete") setJobs((current) => current.filter((item) => item.id !== job.id));
@@ -242,6 +276,8 @@ export function ToolsView({ setToast, onOpenSettings }: { setToast: (value: stri
             {selectedId === "extract-audio" && <OptionSelect label="Output format" value={audioFormat} setValue={setAudioFormat} options={[["wav", "WAV · editing quality"], ["m4a", "M4A · compact"]]} />}
             {selectedId === "extract-subtitles" && <OptionNumber label="Subtitle track" suffix="track number" value={subtitleTrack} setValue={setSubtitleTrack} min="1" max="32" />}
             {selectedId === "extract-web-captions" && <><OptionText label="Video webpage or media link" value={captionUrl} setValue={setCaptionUrl} placeholder="Paste a supported video webpage URL" type="url" /><OptionText label="Caption language code" value={captionLanguage} setValue={setCaptionLanguage} placeholder="en, my, th…" /><LinkToolNote text="The extractor opens the webpage and saves captions already exposed by that site. It does not require a direct file URL, transcribe audio, or load an ML model." /></>}
+            {selectedId === "long-video-analyze" && <><OptionSelect label="Speech language" value={sourceLanguage} setValue={setSourceLanguage} options={[["auto", "Auto detect"], ...speechLanguages.map((language) => [language, language])]} /><OptionNumber label="Candidates" suffix="clips" value={longMaxClips} setValue={setLongMaxClips} min="1" max="10" /><OptionNumber label="Minimum length" suffix="seconds" value={longMinSeconds} setValue={setLongMinSeconds} min="15" max="60" /><OptionNumber label="Maximum length" suffix="seconds" value={longMaxSeconds} setValue={setLongMaxSeconds} min="30" max="120" /><ToolCheck checked={longRightsConfirmed} setChecked={setLongRightsConfirmed} title="I own or am licensed to use this source" detail="Required before source analysis." /><ToolCheck checked={longCloudConsent} setChecked={setLongCloudConsent} title="I consent to Gemini cloud processing" detail="Audio may be sent for transcription; timed text is sent for highlight selection." /></>}
+            {selectedId === "long-video-render" && <><ToolCheck checked={longRightsConfirmed} setChecked={setLongRightsConfirmed} title="I own or am licensed to use this source" detail="Required before rendering." /><ToolCheck checked={longCaptions} setChecked={setLongCaptions} title="Burn captions into each short" detail="Uses the source-aligned transcript." /><ToolCheck checked={applyBrandKit} setChecked={setApplyBrandKit} title="Apply active Brand Kit" detail="Uses the saved production preset." /><ToolCheck checked={longMirror} setChecked={setLongMirror} title="Mirror the picture" detail="Optional composition choice; not a policy workaround." /><ToolCheck checked={longTransitions} setChecked={setLongTransitions} title="Add fade transitions" detail="Adds brief opening and closing fades." />{(longMirror || longTransitions) && <ToolCheck checked={longRemixConfirmed} setChecked={setLongRemixConfirmed} title="I approve the creative remix edits" detail="These edits do not create rights or policy compliance." />}</>}
             {selectedId === "transcribe" && <OptionSelect label="Speech language" value={sourceLanguage} setValue={setSourceLanguage} options={[["auto", "Auto detect"], ...speechLanguages.map((language) => [language, language])]} />}
             {selectedId === "translate" && <OptionSelect label="Translate to" value={targetLanguage} setValue={setTargetLanguage} options={voiceLanguages.map((language) => [language, language])} />}
             {selectedId === "speech-synthesis" && <><OptionSelect label="Speech language" value={speechLanguage} setValue={changeSpeechLanguage} options={speechLanguages.map((language) => [language, language])} /><OptionSelect label="Voice engine" value={ttsEngine} setValue={(value) => setTtsEngine(value as TtsEngine)} options={ttsEngineOptions(speechLanguage).map((option) => typeof option === "string" ? [option, option] : [option.value, option.label])} /><OptionSelect label="Narrator" value={narratorId} setValue={(value) => setNarratorId(value as NarratorId)} options={narrators.map((narrator) => [narrator.id, `${narrator.name} · ${narrator.role}`])} /><OptionNumber label="Speech speed" suffix="×" value={speechSpeed} setValue={setSpeechSpeed} min="0.8" max="1.4" step="0.05" /></>}
@@ -295,6 +331,10 @@ function LinkToolNote({ text }: { text: string }) {
   return <div className="tool-link-note"><Link2 size={13} /><span>{text}</span></div>;
 }
 
+function ToolCheck({ checked, setChecked, title, detail }: { checked: boolean; setChecked: (value: boolean) => void; title: string; detail: string }) {
+  return <label className="tool-check-option"><button type="button" className={checked ? "checked" : ""} onClick={() => setChecked(!checked)}>{checked && <Check size={12} />}</button><span><strong>{title}</strong><small>{detail}</small></span></label>;
+}
+
 function toolName(id: string) {
   return tools.find((tool) => tool.id === id)?.name ?? id;
 }
@@ -313,13 +353,28 @@ function toolAiRequirement(toolId: ToolId, ttsEngine: TtsEngine, health: ToolHea
   }
   if (toolId === "transcribe") {
     const ready = health ? Boolean(health.stt?.ready) : undefined;
+    const local = health?.stt?.provider === "faster-whisper";
     return {
-      kind: "local",
-      title: "Local AI · audio stays on this Mac",
-      description: "Uses faster-whisper on this Mac. Your audio stays local.",
-      status: ready === undefined ? "Checking setup…" : ready ? "Ready" : "Not installed",
+      kind: local ? "local" : "cloud",
+      title: local ? "Local AI · audio stays on this Mac" : "Gemini cloud transcription · audio sent to Google",
+      description: local
+        ? "Uses faster-whisper on this Mac. Your audio stays local."
+        : `Uses ${health?.stt?.model ?? "Gemini Flash-Lite"} on a normalized audio-only copy. The remote file is deleted after transcription.`,
+      status: ready === undefined ? "Checking setup…" : ready ? (local ? "Model ready" : "Gemini connected") : (local ? "Not installed" : "Gemini key missing"),
       ready,
-      setupCommand: ready === false ? "npm run stt:setup" : undefined,
+      setupCommand: local && ready === false ? "npm run stt:setup" : undefined,
+      settings: !local,
+    };
+  }
+  if (toolId === "long-video-analyze") {
+    const ready = health ? Boolean(health.providers?.gemini) : undefined;
+    return {
+      kind: "cloud",
+      title: "Gemini Flash-Lite · audio or transcript sent to Google",
+      description: "Existing captions are preferred. Without captions, Gemini transcribes a compressed audio copy before analyzing the timed transcript.",
+      status: ready === undefined ? "Checking key…" : ready ? "Gemini connected" : "Gemini key missing",
+      ready,
+      settings: true,
     };
   }
   if (toolId === "translate") {

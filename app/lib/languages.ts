@@ -31,6 +31,7 @@ export function ttsEngineLabel(engine: TtsEngine | undefined, language: string) 
 export function jobTtsEngineLabel(job: LocalJob) {
   if (job.request.ttsEngine) return ttsEngineLabel(job.request.ttsEngine, job.request.language);
   const provider = String(job.metadata?.voiceProvider ?? "");
+  if (/original source audio/i.test(provider)) return "Original audio";
   if (/voxcpm/i.test(provider)) return "VoxCPM2";
   if (/gemini|google/i.test(provider)) return "Gemini TTS";
   if (/kokoro/i.test(provider)) return "Kokoro";

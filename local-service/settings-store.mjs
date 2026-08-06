@@ -12,7 +12,11 @@ export function secretsFilePath() {
 const ALLOWED_SETTINGS = new Map([
   ["geminiApiKey", "GEMINI_API_KEY"],
   ["geminiTextModel", "GEMINI_TEXT_MODEL"],
+  ["geminiCreativeModel", "GEMINI_CREATIVE_MODEL"],
+  ["geminiUtilityModel", "GEMINI_UTILITY_MODEL"],
+  ["geminiSttModel", "GEMINI_STT_MODEL"],
   ["geminiTtsModel", "GEMINI_TTS_MODEL"],
+  ["reelioSttProvider", "REELIO_STT_PROVIDER"],
   ["geminiTtsVoice", "GEMINI_TTS_VOICE"],
   ["reelioTextProvider", "REELIO_TEXT_PROVIDER"],
   ["kokoroVoice", "KOKORO_VOICE"],

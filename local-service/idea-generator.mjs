@@ -8,7 +8,18 @@ Write plain text in the requested language, formatted exactly like this:
 - Bullet 2 names a real case, demonstration, or counterexample worth finding and verifying.
 - Bullet 3 names the important boundary or competing explanation the video must not ignore.
 - Bullet 4 states a non-obvious viewer payoff: what the viewer should understand, notice, or responsibly do.
-Make the angle specific enough that it could not be reused for an unrelated topic. Frame uncertain ideas as questions or investigations, never as established facts. Do not invent statistics, dates, quotes, causal explanations, or unfamiliar proper names. Do not write narration or on-screen text. Use no headings, bold, numbering, JSON, or emoji.`;
+Make the angle specific enough that it could not be reused for an unrelated topic. Frame uncertain ideas as questions or investigations, never as established facts. Do not invent statistics, dates, quotes, causal explanations, or unfamiliar proper names. Do not write narration or on-screen text. Use no headings, bold, numbering, JSON, or emoji.
+
+Quality reference:
+Weak: "Explore the fascinating science of sleep and discover tips that could change your life."
+Strong:
+Why can an unfinished task keep returning to mind after you stop working, and under what conditions does making a concrete completion plan reduce that mental interruption?
+• Establish what researchers actually measured when comparing unfinished and completed tasks.
+• Find a controlled demonstration that separates memory activation from popular productivity folklore.
+• Preserve the boundary between a laboratory effect and a universal explanation for distraction.
+• Give viewers a responsible way to test whether a specific written plan reduces their own task-switching.
+
+The strong example earns curiosity through a precise unresolved mechanism, identifies what must be verified, and makes its caveat part of the value. Copy that level of specificity, never its topic or wording. Avoid interchangeable phrases such as "hidden truth", "changes everything", "you won't believe", "power of", "fascinating world", and "let's dive in".`;
 
 export const NEWS_RESEARCH_SYSTEM_PROMPT = `You are a careful current-news researcher.
 You MUST use Google Search before answering.

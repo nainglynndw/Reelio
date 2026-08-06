@@ -12,12 +12,16 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { platforms } from "../lib/platforms";
-import { SERVICE_URL } from "../lib/service";
+import { serviceFetch, SERVICE_URL } from "../lib/service";
 import type { FacebookStatus, InstagramStatus, ProviderHealth, TextHealth, TikTokStatus, TtsHealth, YouTubeStatus } from "../lib/types";
 import { PlatformLogo } from "./common";
 import { FacebookSetupGuide, InstagramSetupGuide, TikTokSetupGuide, YouTubeSetupGuide } from "./setup-guides";
 
-export function SettingsView({ setToast }: { setToast: (value: string) => void }) {
+export function SettingsView({ authenticated, onRequireAuthentication, setToast }: {
+  authenticated: boolean;
+  onRequireAuthentication: () => boolean;
+  setToast: (value: string) => void;
+}) {
   const [showSecret, setShowSecret] = useState(false);
   const [geminiKey, setGeminiKey] = useState("");
   const [openRouterKey, setOpenRouterKey] = useState("");
@@ -53,36 +57,50 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
   const [ttsHealth, setTtsHealth] = useState<TtsHealth | null>(null);
   const [voxHealth, setVoxHealth] = useState<TtsHealth | null>(null);
   const [textHealth, setTextHealth] = useState<TextHealth | null>(null);
-  const checkHealth = () => fetch(`${SERVICE_URL}/health`).then((response) => response.json()).then((value: { providers?: ProviderHealth; tts?: TtsHealth; voxcpm2?: TtsHealth; text?: TextHealth }) => { setHealth(value.providers ?? null); setTtsHealth(value.tts ?? null); setVoxHealth(value.voxcpm2 ?? null); setTextHealth(value.text ?? null); setToast("Provider status refreshed"); }).catch(() => { setHealth(null); setTtsHealth(null); setVoxHealth(null); setTextHealth(null); setToast("Local worker is offline"); });
+  const checkHealth = () => serviceFetch(`${SERVICE_URL}/health`).then((response) => response.json()).then((value: { providers?: ProviderHealth; tts?: TtsHealth; voxcpm2?: TtsHealth; text?: TextHealth }) => { setHealth(value.providers ?? null); setTtsHealth(value.tts ?? null); setVoxHealth(value.voxcpm2 ?? null); setTextHealth(value.text ?? null); setToast("Provider status refreshed"); }).catch(() => { setHealth(null); setTtsHealth(null); setVoxHealth(null); setTextHealth(null); setToast("Local worker is offline"); });
   useEffect(() => {
-    fetch(`${SERVICE_URL}/health`).then((response) => response.json()).then((value: { providers?: ProviderHealth; tts?: TtsHealth; voxcpm2?: TtsHealth; text?: TextHealth }) => { setHealth(value.providers ?? null); setTtsHealth(value.tts ?? null); setVoxHealth(value.voxcpm2 ?? null); setTextHealth(value.text ?? null); }).catch(() => { setHealth(null); setTtsHealth(null); setVoxHealth(null); setTextHealth(null); });
-    fetch(`${SERVICE_URL}/oauth/youtube/status`).then((response) => response.json()).then((value: YouTubeStatus) => setYoutubeStatus(value)).catch(() => setYoutubeStatus(null));
-    fetch(`${SERVICE_URL}/oauth/tiktok/status`).then((response) => response.json()).then((value: TikTokStatus) => setTiktokStatus(value)).catch(() => setTiktokStatus(null));
-    fetch(`${SERVICE_URL}/publishing/facebook/status`).then((response) => response.json()).then((value: FacebookStatus) => setFacebookStatus(value)).catch(() => setFacebookStatus(null));
-    fetch(`${SERVICE_URL}/publishing/instagram/status`).then((response) => response.json()).then((value: InstagramStatus) => setInstagramStatus(value)).catch(() => setInstagramStatus(null));
+    serviceFetch(`${SERVICE_URL}/health`).then((response) => response.json()).then((value: { providers?: ProviderHealth; tts?: TtsHealth; voxcpm2?: TtsHealth; text?: TextHealth }) => { setHealth(value.providers ?? null); setTtsHealth(value.tts ?? null); setVoxHealth(value.voxcpm2 ?? null); setTextHealth(value.text ?? null); }).catch(() => { setHealth(null); setTtsHealth(null); setVoxHealth(null); setTextHealth(null); });
+    let clearPrivateStatus: number | undefined;
+    if (authenticated) {
+      serviceFetch(`${SERVICE_URL}/oauth/youtube/status`).then((response) => response.json()).then((value: YouTubeStatus) => setYoutubeStatus(value)).catch(() => setYoutubeStatus(null));
+      serviceFetch(`${SERVICE_URL}/oauth/tiktok/status`).then((response) => response.json()).then((value: TikTokStatus) => setTiktokStatus(value)).catch(() => setTiktokStatus(null));
+      serviceFetch(`${SERVICE_URL}/publishing/facebook/status`).then((response) => response.json()).then((value: FacebookStatus) => setFacebookStatus(value)).catch(() => setFacebookStatus(null));
+      serviceFetch(`${SERVICE_URL}/publishing/instagram/status`).then((response) => response.json()).then((value: InstagramStatus) => setInstagramStatus(value)).catch(() => setInstagramStatus(null));
+    } else {
+      clearPrivateStatus = window.setTimeout(() => {
+        setYoutubeStatus(null);
+        setTiktokStatus(null);
+        setFacebookStatus(null);
+        setInstagramStatus(null);
+      }, 0);
+    }
     const receiveOAuth = (event: MessageEvent) => {
       if (event.data?.type === "reelio-youtube-oauth") {
         setToast(event.data.message ?? (event.data.ok ? "YouTube connected" : "YouTube connection failed"));
-        fetch(`${SERVICE_URL}/oauth/youtube/status`).then((response) => response.json()).then((value: YouTubeStatus) => setYoutubeStatus(value)).catch(() => setYoutubeStatus(null));
+        serviceFetch(`${SERVICE_URL}/oauth/youtube/status`).then((response) => response.json()).then((value: YouTubeStatus) => setYoutubeStatus(value)).catch(() => setYoutubeStatus(null));
       }
       if (event.data?.type === "reelio-tiktok-oauth") {
         setToast(event.data.message ?? (event.data.ok ? "TikTok connected" : "TikTok connection failed"));
-        fetch(`${SERVICE_URL}/oauth/tiktok/status`).then((response) => response.json()).then((value: TikTokStatus) => setTiktokStatus(value)).catch(() => setTiktokStatus(null));
+        serviceFetch(`${SERVICE_URL}/oauth/tiktok/status`).then((response) => response.json()).then((value: TikTokStatus) => setTiktokStatus(value)).catch(() => setTiktokStatus(null));
       }
       if (event.data?.type === "reelio-facebook-oauth") {
         setToast(event.data.message ?? (event.data.ok ? "Facebook connected" : "Facebook connection failed"));
-        fetch(`${SERVICE_URL}/publishing/facebook/status`).then((response) => response.json()).then((value: FacebookStatus) => setFacebookStatus(value)).catch(() => setFacebookStatus(null));
-        fetch(`${SERVICE_URL}/publishing/instagram/status`).then((response) => response.json()).then((value: InstagramStatus) => setInstagramStatus(value)).catch(() => setInstagramStatus(null));
+        serviceFetch(`${SERVICE_URL}/publishing/facebook/status`).then((response) => response.json()).then((value: FacebookStatus) => setFacebookStatus(value)).catch(() => setFacebookStatus(null));
+        serviceFetch(`${SERVICE_URL}/publishing/instagram/status`).then((response) => response.json()).then((value: InstagramStatus) => setInstagramStatus(value)).catch(() => setInstagramStatus(null));
       }
     };
     window.addEventListener("message", receiveOAuth);
-    return () => window.removeEventListener("message", receiveOAuth);
-  }, [setToast]);
+    return () => {
+      window.removeEventListener("message", receiveOAuth);
+      if (clearPrivateStatus !== undefined) window.clearTimeout(clearPrivateStatus);
+    };
+  }, [authenticated, setToast]);
 
   async function checkYouTube(showGuideWhenMissing = true) {
+    if (!authenticated) return void onRequireAuthentication();
     setCheckingYoutube(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/oauth/youtube/status`);
+      const response = await serviceFetch(`${SERVICE_URL}/oauth/youtube/status`);
       const result = await response.json() as YouTubeStatus & { error?: string };
       if (!response.ok) throw new Error(result.error ?? "YouTube connection could not be checked");
       setYoutubeStatus(result);
@@ -98,12 +116,13 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
   }
 
   async function connectYouTube() {
+    if (!authenticated) return void onRequireAuthentication();
     const popup = window.open("about:blank", "reelio-youtube-oauth", "popup,width=560,height=760");
     setConnectingYoutube(true);
     try {
       if (youtubeClientId.trim() || youtubeClientSecret.trim()) {
         if (!youtubeClientId.trim() || !youtubeClientSecret.trim()) throw new Error("Enter both the Google client ID and client secret.");
-        const saved = await fetch(`${SERVICE_URL}/settings`, {
+        const saved = await serviceFetch(`${SERVICE_URL}/settings`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ googleClientId: youtubeClientId.trim(), googleClientSecret: youtubeClientSecret.trim(), youtubePrivacy: "public" }),
@@ -112,7 +131,7 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
         if (!saved.ok) throw new Error(savedResult.error ?? "YouTube credentials could not be saved");
         setYoutubeClientId(""); setYoutubeClientSecret("");
       } else if (!youtubeStatus?.configured) throw new Error("Enter the Google client ID and client secret.");
-      const response = await fetch(`${SERVICE_URL}/oauth/youtube/start`, { method: "POST" });
+      const response = await serviceFetch(`${SERVICE_URL}/oauth/youtube/start`, { method: "POST" });
       const result = await response.json() as { authUrl?: string; error?: string };
       if (!response.ok || !result.authUrl) throw new Error(result.error ?? "YouTube authorization could not start");
       if (!popup) throw new Error("Allow pop-ups for Reelio, then press Connect YouTube again.");
@@ -125,9 +144,10 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
   }
 
   async function checkTikTok(showGuideWhenMissing = true) {
+    if (!authenticated) return void onRequireAuthentication();
     setCheckingTiktok(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/oauth/tiktok/status`);
+      const response = await serviceFetch(`${SERVICE_URL}/oauth/tiktok/status`);
       const result = await response.json() as TikTokStatus & { error?: string };
       if (!response.ok) throw new Error(result.error ?? "TikTok connection could not be checked");
       setTiktokStatus(result);
@@ -143,12 +163,13 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
   }
 
   async function connectTikTok() {
+    if (!authenticated) return void onRequireAuthentication();
     const popup = window.open("about:blank", "reelio-tiktok-oauth", "popup,width=560,height=760");
     setConnectingTiktok(true);
     try {
       if (tiktokClientKey.trim() || tiktokClientSecret.trim()) {
         if (!tiktokClientKey.trim() || !tiktokClientSecret.trim()) throw new Error("Enter both the TikTok client key and client secret.");
-        const saved = await fetch(`${SERVICE_URL}/settings`, {
+        const saved = await serviceFetch(`${SERVICE_URL}/settings`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ tiktokClientKey: tiktokClientKey.trim(), tiktokClientSecret: tiktokClientSecret.trim() }),
@@ -157,7 +178,7 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
         if (!saved.ok) throw new Error(savedResult.error ?? "TikTok credentials could not be saved");
         setTiktokClientKey(""); setTiktokClientSecret("");
       } else if (!tiktokStatus?.configured) throw new Error("Enter the TikTok client key and client secret.");
-      const response = await fetch(`${SERVICE_URL}/oauth/tiktok/start`, { method: "POST" });
+      const response = await serviceFetch(`${SERVICE_URL}/oauth/tiktok/start`, { method: "POST" });
       const result = await response.json() as { authUrl?: string; error?: string };
       if (!response.ok || !result.authUrl) throw new Error(result.error ?? "TikTok authorization could not start");
       if (!popup) throw new Error("Allow pop-ups for Reelio, then press Connect TikTok again.");
@@ -170,9 +191,10 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
   }
 
   async function checkFacebook(showGuideWhenMissing = true) {
+    if (!authenticated) return void onRequireAuthentication();
     setCheckingFacebook(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/publishing/facebook/status`);
+      const response = await serviceFetch(`${SERVICE_URL}/publishing/facebook/status`);
       const result = await response.json() as FacebookStatus & { error?: string };
       if (!response.ok) throw new Error(result.error ?? "Facebook Page connection could not be checked");
       setFacebookStatus(result);
@@ -188,12 +210,13 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
   }
 
   async function connectFacebook() {
+    if (!authenticated) return void onRequireAuthentication();
     const popup = window.open("about:blank", "reelio-facebook-oauth", "popup,width=560,height=760");
     setConnectingFacebook(true);
     try {
       if (metaAppId.trim() || metaAppSecret.trim()) {
         if (!metaAppId.trim() || !metaAppSecret.trim()) throw new Error("Enter both the Meta app ID and app secret.");
-        const saved = await fetch(`${SERVICE_URL}/settings`, {
+        const saved = await serviceFetch(`${SERVICE_URL}/settings`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ metaAppId: metaAppId.trim(), metaAppSecret: metaAppSecret.trim() }),
@@ -202,7 +225,7 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
         if (!saved.ok) throw new Error(savedResult.error ?? "Meta app credentials could not be saved");
         setMetaAppId(""); setMetaAppSecret("");
       } else if (!facebookStatus?.configured) throw new Error("Enter the Meta app ID and app secret.");
-      const response = await fetch(`${SERVICE_URL}/oauth/facebook/start`, { method: "POST" });
+      const response = await serviceFetch(`${SERVICE_URL}/oauth/facebook/start`, { method: "POST" });
       const result = await response.json() as { authUrl?: string; error?: string };
       if (!response.ok || !result.authUrl) throw new Error(result.error ?? "Facebook authorization could not start");
       if (!popup) throw new Error("Allow pop-ups for Reelio, then press Connect Facebook again.");
@@ -215,9 +238,10 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
   }
 
   async function selectFacebookPage(pageId: string) {
+    if (!authenticated) return void onRequireAuthentication();
     setSelectingFacebookPage(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/oauth/facebook/select-page`, {
+      const response = await serviceFetch(`${SERVICE_URL}/oauth/facebook/select-page`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pageId }),
@@ -227,16 +251,17 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
       setFacebookStatus(result);
       if (result.connected) setToast(`${result.pageName ?? "Facebook Page"} is connected and ready for Reels`);
       else setToast(result.message ?? "Choose a Facebook Page to finish connecting");
-      fetch(`${SERVICE_URL}/publishing/instagram/status`).then((value) => value.json()).then((value: InstagramStatus) => setInstagramStatus(value)).catch(() => {});
+      serviceFetch(`${SERVICE_URL}/publishing/instagram/status`).then((value) => value.json()).then((value: InstagramStatus) => setInstagramStatus(value)).catch(() => {});
     } catch (error) {
       setToast(error instanceof Error ? error.message : "The Facebook Page could not be selected");
     } finally { setSelectingFacebookPage(false); }
   }
 
   async function checkInstagram(showGuideWhenMissing = true) {
+    if (!authenticated) return void onRequireAuthentication();
     setCheckingInstagram(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/publishing/instagram/status`);
+      const response = await serviceFetch(`${SERVICE_URL}/publishing/instagram/status`);
       const result = await response.json() as InstagramStatus & { error?: string };
       if (!response.ok) throw new Error(result.error ?? "Instagram connection could not be checked");
       setInstagramStatus(result);
@@ -252,10 +277,11 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
   }
 
   async function saveAndCheckInstagram() {
+    if (!authenticated) return void onRequireAuthentication();
     setSavingInstagram(true);
     try {
       if (!publicMediaBaseUrl.trim()) throw new Error("Enter the public media base URL Meta can download finished Reels from.");
-      const response = await fetch(`${SERVICE_URL}/settings`, {
+      const response = await serviceFetch(`${SERVICE_URL}/settings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ publicMediaBaseUrl: publicMediaBaseUrl.trim() }),
@@ -263,7 +289,7 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
       const saved = await response.json() as { error?: string };
       if (!response.ok) throw new Error(saved.error ?? "Instagram credentials could not be saved");
       setPublicMediaBaseUrl("");
-      const statusResponse = await fetch(`${SERVICE_URL}/publishing/instagram/status`);
+      const statusResponse = await serviceFetch(`${SERVICE_URL}/publishing/instagram/status`);
       const status = await statusResponse.json() as InstagramStatus & { error?: string };
       if (!statusResponse.ok) throw new Error(status.error ?? "Instagram connection could not be checked");
       setInstagramStatus(status);
@@ -275,11 +301,16 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
   }
 
   async function saveSettings() {
+    if (!authenticated) return void onRequireAuthentication();
     setSaving(true);
     try {
       const payload: Record<string, string> = {
         reelioTextProvider: "google",
-        geminiTextModel: "gemini-3.5-flash",
+        reelioSttProvider: "gemini",
+        geminiTextModel: "gemini-3.6-flash",
+        geminiCreativeModel: "gemini-3.6-flash",
+        geminiUtilityModel: "gemini-3.5-flash-lite",
+        geminiSttModel: "gemini-3.5-flash-lite",
         geminiTtsModel: "gemini-3.1-flash-tts-preview",
         kokoroSpeed: "1.15",
         openrouterTextModel: textModel,
@@ -296,7 +327,7 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
       if (metaAppId.trim()) payload.metaAppId = metaAppId.trim();
       if (metaAppSecret.trim()) payload.metaAppSecret = metaAppSecret.trim();
       if (publicMediaBaseUrl.trim()) payload.publicMediaBaseUrl = publicMediaBaseUrl.trim();
-      const response = await fetch(`${SERVICE_URL}/settings`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      const response = await serviceFetch(`${SERVICE_URL}/settings`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const result = await response.json() as { error?: string };
       if (!response.ok) throw new Error(result.error ?? "Settings could not be saved");
       setGeminiKey(""); setOpenRouterKey(""); setPexelsKey(""); setPixabayKey(""); setYoutubeClientId(""); setYoutubeClientSecret(""); setTiktokClientKey(""); setTiktokClientSecret(""); setMetaAppId(""); setMetaAppSecret(""); setPublicMediaBaseUrl("");
@@ -310,9 +341,9 @@ export function SettingsView({ setToast }: { setToast: (value: string) => void }
       <div className="page-heading"><div><div className="eyebrow"><span /> LOCAL SETTINGS</div><h1>Connect your creative stack.</h1><p>Secrets are written to a private local file and never stored in browser storage.</p></div><button className="primary-small" onClick={saveSettings} disabled={saving}><Check size={17} /> {saving ? "Saving…" : "Save settings"}</button></div>
       <div className="settings-grid">
         <section className="settings-card wide-settings">
-          <div className="settings-title"><div className="provider-icon openrouter"><Sparkles size={20} /></div><div><strong>Google Gemini — text, translation, and multilingual voice</strong><span>Scripts • translation • selectable Gemini TTS narration</span></div><em className={health?.gemini ? "connected" : ""}><i /> {health?.gemini ? "Connected" : "Key required"}</em></div>
-          <label className="secret-field"><span>Gemini API key</span><div><input type={showSecret ? "text" : "password"} placeholder={health?.gemini ? "Connected — enter only to replace" : "Paste Google AI Studio API key"} value={geminiKey} onChange={(event) => setGeminiKey(event.target.value)} autoComplete="off" /><button onClick={() => setShowSecret(!showSecret)}>{showSecret ? "Hide" : "Show"}</button></div><small>Used for scripts, translation, current-news grounding, and optional Gemini TTS. Saved only in .env.local.</small></label>
-          <div className="local-model-summary"><span><strong>gemini-3.5-flash</strong><small>Factual master scripts and translation</small></span><span><strong>gemini-3.1-flash-tts-preview</strong><small>Four matched narrator voices • multilingual delivery</small></span></div>
+          <div className="settings-title"><div className="provider-icon openrouter"><Sparkles size={20} /></div><div><strong>Google Gemini — writing, transcription, and voice</strong><span>Scripts • Flash-Lite transcription • translation • selectable narration</span></div><em className={health?.gemini ? "connected" : ""}><i /> {health?.gemini ? "Connected" : "Key required"}</em></div>
+          <label className="secret-field"><span>Gemini API key</span><div><input type={showSecret ? "text" : "password"} placeholder={health?.gemini ? "Connected — enter only to replace" : "Paste Google AI Studio API key"} value={geminiKey} onChange={(event) => setGeminiKey(event.target.value)} autoComplete="off" /><button onClick={() => setShowSecret(!showSecret)}>{showSecret ? "Hide" : "Show"}</button></div><small>Used for scripts, hosted audio transcription, translation, current-news grounding, and optional Gemini TTS. Saved only in the worker-owned secrets file.</small></label>
+          <div className="local-model-summary"><span><strong>{textHealth?.creativeModel ?? "gemini-3.6-flash"}</strong><small>Ideas, research, scripts, and conversation writing</small></span><span><strong>{textHealth?.utilityModel ?? "gemini-3.5-flash-lite"}</strong><small>Translation, structured metadata, and hosted transcription</small></span><span><strong>gemini-3.1-flash-tts-preview</strong><small>Four matched narrator voices • multilingual delivery</small></span></div>
           <button className="secondary-action" onClick={checkHealth}><RefreshCw size={15} /> Refresh Gemini status</button>
         </section>
         <section className="settings-card wide-settings">

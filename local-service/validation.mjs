@@ -48,6 +48,9 @@ export function normalizeVideoRequest(value) {
     if (!normalized.visualThemes) throw new ValidationError("Visual selections require a reviewed visual theme plan.");
     normalized.visualSelections = normalizeVisualSelections(value.visualSelections, normalized.visualThemes.length);
   }
+  if (value.sourceJobId != null && String(value.sourceJobId).trim()) {
+    normalized.sourceJobId = cleanText(value.sourceJobId, "Source video job", 3, 120);
+  }
   return normalized;
 }
 

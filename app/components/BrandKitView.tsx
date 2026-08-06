@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { narrators } from "../lib/narrators";
-import { SERVICE_URL } from "../lib/service";
+import { serviceFetch, SERVICE_URL } from "../lib/service";
 import type { BrandAssetKind, BrandKit } from "../lib/types";
 
 const assetCards: Array<{ kind: BrandAssetKind; title: string; detail: string; accept: string; icon: React.ReactNode }> = [
@@ -24,36 +24,49 @@ const assetCards: Array<{ kind: BrandAssetKind; title: string; detail: string; a
   { kind: "music", title: "Background music", detail: "Audio loops to the video duration", accept: "audio/*,.mp3,.m4a,.wav,.aac,.flac,.ogg", icon: <Music2 size={18} /> },
 ];
 
-export function BrandKitView({ setToast, onBrandKitChange }: {
+export function BrandKitView({ authenticated, onRequireAuthentication, setToast, onBrandKitChange }: {
+  authenticated: boolean;
+  onRequireAuthentication: () => boolean;
   setToast: (value: string) => void;
   onBrandKitChange: (brandKit: BrandKit) => void;
 }) {
-  const [kit, setKit] = useState<BrandKit | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [kit, setKit] = useState<BrandKit | null>(() => authenticated ? null : previewBrandKit());
+  const [loading, setLoading] = useState(authenticated);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState<BrandAssetKind | null>(null);
 
   useEffect(() => {
-    fetch(`${SERVICE_URL}/brand-kit`)
+    if (!authenticated) {
+      const clear = window.setTimeout(() => {
+        setKit(previewBrandKit());
+        setLoading(false);
+      }, 0);
+      return () => window.clearTimeout(clear);
+    }
+    let cancelled = false;
+    serviceFetch(`${SERVICE_URL}/brand-kit`)
       .then(async (response) => {
         const result = await response.json() as { brandKit?: BrandKit; error?: string };
         if (!response.ok || !result.brandKit) throw new Error(result.error ?? "Brand Kit could not be loaded.");
+        if (cancelled) return;
         setKit(result.brandKit);
         onBrandKitChange(result.brandKit);
       })
-      .catch((error) => setToast(error instanceof Error ? error.message : "Brand Kit could not be loaded."))
-      .finally(() => setLoading(false));
-  }, [onBrandKitChange, setToast]);
+      .catch((error) => { if (!cancelled) setToast(error instanceof Error ? error.message : "Brand Kit could not be loaded."); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [authenticated, onBrandKitChange, setToast]);
 
   function update<Key extends keyof BrandKit>(key: Key, value: BrandKit[Key]) {
     setKit((current) => current ? { ...current, [key]: value } : current);
   }
 
   async function save() {
+    if (!authenticated) return void onRequireAuthentication();
     if (!kit || saving) return;
     setSaving(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/brand-kit`, {
+      const response = await serviceFetch(`${SERVICE_URL}/brand-kit`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(brandKitSettings(kit)),
@@ -71,17 +84,18 @@ export function BrandKitView({ setToast, onBrandKitChange }: {
   }
 
   async function upload(kind: BrandAssetKind, file?: File) {
+    if (!authenticated) return void onRequireAuthentication();
     if (!file || uploading || !kit) return;
     setUploading(kind);
     try {
-      const saveResponse = await fetch(`${SERVICE_URL}/brand-kit`, {
+      const saveResponse = await serviceFetch(`${SERVICE_URL}/brand-kit`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(brandKitSettings(kit)),
       });
       const saved = await saveResponse.json() as { brandKit?: BrandKit; error?: string };
       if (!saveResponse.ok || !saved.brandKit) throw new Error(saved.error ?? "Save the Brand Kit before uploading an asset.");
-      const response = await fetch(`${SERVICE_URL}/brand-kit/assets/${kind}`, {
+      const response = await serviceFetch(`${SERVICE_URL}/brand-kit/assets/${kind}`, {
         method: "POST",
         headers: {
           "Content-Type": file.type || "application/octet-stream",
@@ -102,16 +116,17 @@ export function BrandKitView({ setToast, onBrandKitChange }: {
   }
 
   async function remove(kind: BrandAssetKind) {
+    if (!authenticated) return void onRequireAuthentication();
     if (!kit?.assets[kind] || !window.confirm("Remove this asset from the active Brand Kit? Existing queued videos keep their saved version.")) return;
     try {
-      const saveResponse = await fetch(`${SERVICE_URL}/brand-kit`, {
+      const saveResponse = await serviceFetch(`${SERVICE_URL}/brand-kit`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(brandKitSettings(kit)),
       });
       const saved = await saveResponse.json() as { brandKit?: BrandKit; error?: string };
       if (!saveResponse.ok || !saved.brandKit) throw new Error(saved.error ?? "Save the Brand Kit before removing an asset.");
-      const response = await fetch(`${SERVICE_URL}/brand-kit/assets/${kind}`, { method: "DELETE" });
+      const response = await serviceFetch(`${SERVICE_URL}/brand-kit/assets/${kind}`, { method: "DELETE" });
       const result = await response.json() as { brandKit?: BrandKit; error?: string };
       if (!response.ok || !result.brandKit) throw new Error(result.error ?? "Brand asset could not be removed.");
       setKit(result.brandKit);
@@ -141,7 +156,7 @@ export function BrandKitView({ setToast, onBrandKitChange }: {
 
       <div className="brand-kit-status-card">
         <div className="brand-kit-live-mark" style={{ background: `linear-gradient(145deg, ${kit.primaryColor}, ${kit.accentColor})` }}><Sparkles size={20} /></div>
-        <span><strong>{kit.name || "Untitled brand"}</strong><small>{kit.enabled ? "Automatically applied to new Quick and Guided Create jobs" : "Saved, but not applied to new videos"}</small></span>
+        <span><strong>{kit.name || "Untitled brand"}</strong><small>{kit.enabled ? "Automatically applied to new Quick Create and Prompt to Video jobs" : "Saved, but not applied to new videos"}</small></span>
         <button className={`brand-kit-toggle ${kit.enabled ? "on" : ""}`} onClick={() => update("enabled", !kit.enabled)} aria-pressed={kit.enabled}>
           <i>{kit.enabled && <Check size={11} />}</i>{kit.enabled ? "Active" : "Inactive"}
         </button>
@@ -227,5 +242,28 @@ function brandKitSettings(kit: BrandKit) {
     socialHandle: kit.socialHandle,
     website: kit.website,
     defaultNarratorId: kit.defaultNarratorId,
+  };
+}
+
+function previewBrandKit(): BrandKit {
+  const now = new Date().toISOString();
+  return {
+    version: 1,
+    enabled: false,
+    name: "My Brand",
+    primaryColor: "#6f4bf3",
+    accentColor: "#18a7b8",
+    fontFamily: "Arial",
+    captionStyle: "bold",
+    logoPosition: "top-right",
+    logoOpacity: 0.88,
+    brandVoice: "Clear, warm, credible, and concise. Explain ideas without hype.",
+    ctaText: "",
+    socialHandle: "",
+    website: "",
+    defaultNarratorId: "maya",
+    assets: { logo: null, intro: null, outro: null, music: null },
+    createdAt: now,
+    updatedAt: now,
   };
 }

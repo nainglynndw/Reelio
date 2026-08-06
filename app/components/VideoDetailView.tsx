@@ -7,6 +7,7 @@ import {
   CircleHelp,
   Clock3,
   CloudUpload,
+  Clapperboard,
   Download,
   ExternalLink,
   Film,
@@ -21,10 +22,10 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { defaultTtsEngine, jobTtsEngineLabel, speechLanguages, ttsEngineLabel, ttsEngineOptions, voiceLanguages } from "../lib/languages";
 import { platformEligibility, platformManageUrl, platforms } from "../lib/platforms";
-import { fetchPublishingReadiness, SERVICE_URL } from "../lib/service";
+import { fetchPublishingReadiness, serviceFetch, SERVICE_URL } from "../lib/service";
 import type { LocalJob, Platform, PlatformEligibility, PlatformPostCopy, PublishResult, PublishingReadiness, TtsEngine } from "../lib/types";
 import { PlatformLogo, SelectField } from "./common";
 
@@ -48,11 +49,27 @@ export function VideoDetailView({ job, generationLocked, onBack, onOpenSettings,
   const [readiness, setReadiness] = useState<PublishingReadiness | null>(null);
   const [checkingTikTokStatus, setCheckingTikTokStatus] = useState(false);
   const [tiktokAutoChecks, setTikTokAutoChecks] = useState(0);
+  const [showcaseSaving, setShowcaseSaving] = useState(false);
+  const [metadataRegenerating, setMetadataRegenerating] = useState(false);
+  const [videoPlaying, setVideoPlaying] = useState(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const isDemo = currentJob.id.startsWith("demo-");
-  const title = currentJob.metadata?.title ?? currentJob.request.prompt;
+  const isLongVideoPackage = currentJob.metadata?.creationMode === "long-video-shorts";
+  const isMessageConversation = currentJob.metadata?.creationMode === "message-conversation";
+  const fallbackTitle = provisionalVideoTitle(currentJob.request.prompt);
+  const title = currentJob.metadata?.provisional
+    ? `${currentJob.request.language} version\n${currentJob.metadata.title ?? fallbackTitle}`
+    : currentJob.metadata?.title
+      ?? ((currentJob.state === "running" || currentJob.state === "queued") && currentJob.request.language !== "English"
+        ? `${currentJob.request.language} version\n${fallbackTitle}`
+        : fallbackTitle);
   const score = currentJob.metadata?.retentionPreflight?.score ?? 0;
   const durationSeconds = Math.round(currentJob.metadata?.durationSeconds ?? 0);
   const renderLocked = generationLocked || currentJob.state === "running" || currentJob.state === "queued";
+  const editorialDescription = currentJob.metadata?.description
+    ?? ((currentJob.state === "running" || currentJob.state === "queued")
+      ? `The localized ${currentJob.request.language} title and editorial description are being prepared.`
+      : currentJob.request.prompt);
   const eligibilityByPlatform = Object.fromEntries(platforms.map((platform) => [platform.id, platformEligibility(currentJob, platform.id, readiness)])) as Record<string, PlatformEligibility>;
 
   function changeVersionSpeechLanguage(value: string) {
@@ -64,7 +81,7 @@ export function VideoDetailView({ job, generationLocked, onBack, onOpenSettings,
     if (isDemo || currentJob.state === "completed" || currentJob.state === "failed" || currentJob.state === "stopped") return;
     const poll = async () => {
       try {
-        const response = await fetch(`${SERVICE_URL}/jobs/${currentJob.id}`);
+        const response = await serviceFetch(`${SERVICE_URL}/jobs/${currentJob.id}`);
         if (!response.ok) return;
         const { job: refreshed } = await response.json() as { job: LocalJob };
         setCurrentJob(refreshed);
@@ -79,8 +96,8 @@ export function VideoDetailView({ job, generationLocked, onBack, onOpenSettings,
 
   useEffect(() => {
     if (!currentJob.assets) return;
-    if (currentJob.assets.transcript) fetch(`${SERVICE_URL}${currentJob.assets.transcript.url}`).then((response) => response.text()).then(setTranscript).catch(() => setTranscript("Transcript could not be loaded."));
-    if (currentJob.assets.captions) fetch(`${SERVICE_URL}${currentJob.assets.captions.url}`).then((response) => response.text()).then(setCaptions).catch(() => setCaptions("Captions could not be loaded."));
+    if (currentJob.assets.transcript) serviceFetch(`${SERVICE_URL}${currentJob.assets.transcript.url}`).then((response) => response.text()).then(setTranscript).catch(() => setTranscript("Transcript could not be loaded."));
+    if (currentJob.assets.captions) serviceFetch(`${SERVICE_URL}${currentJob.assets.captions.url}`).then((response) => response.text()).then(setCaptions).catch(() => setCaptions("Captions could not be loaded."));
   }, [currentJob.id, currentJob.assets]);
 
   useEffect(() => {
@@ -95,7 +112,7 @@ export function VideoDetailView({ job, generationLocked, onBack, onOpenSettings,
     let cancelled = false;
     const poll = async () => {
       try {
-        const response = await fetch(`${SERVICE_URL}/jobs/${currentJob.id}`);
+        const response = await serviceFetch(`${SERVICE_URL}/jobs/${currentJob.id}`);
         if (!response.ok || cancelled) return;
         const { job: refreshed } = await response.json() as { job: LocalJob };
         setCurrentJob(refreshed);
@@ -113,7 +130,7 @@ export function VideoDetailView({ job, generationLocked, onBack, onOpenSettings,
       setCheckingTikTokStatus(true);
       setTikTokAutoChecks((count) => count + 1);
       try {
-        const response = await fetch(`${SERVICE_URL}/jobs/${currentJob.id}/publish`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platforms: ["tiktok"] }) });
+        const response = await serviceFetch(`${SERVICE_URL}/jobs/${currentJob.id}/publish`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platforms: ["tiktok"] }) });
         const result = await response.json() as { error?: string; results?: Record<string, PublishResult> };
         if (!response.ok) throw new Error(result.error ?? "TikTok status check failed");
         const results = result.results ?? {};
@@ -132,6 +149,10 @@ export function VideoDetailView({ job, generationLocked, onBack, onOpenSettings,
   }, [checkingTikTokStatus, currentJob.id, eligibilityByPlatform.tiktok?.eligible, publishResults.tiktok?.status, publishResults.tiktok?.tiktokStatus, publishing, setToast, tiktokAutoChecks]);
 
   async function createLanguageVersion() {
+    if (isMessageConversation) {
+      setToast("Duplicate and translate the reviewed conversation from Message Conversation mode.");
+      return;
+    }
     if (isDemo) {
       setToast("Generate a real video first, then add language versions");
       return;
@@ -142,10 +163,10 @@ export function VideoDetailView({ job, generationLocked, onBack, onOpenSettings,
     }
     setVersionCreating(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/jobs`, {
+      const response = await serviceFetch(`${SERVICE_URL}/jobs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...currentJob.request, language: newSpeechLanguage, ttsEngine: newTtsEngine, subtitleLanguage: newSubtitleLanguage }),
+        body: JSON.stringify({ ...currentJob.request, sourceJobId: currentJob.id, language: newSpeechLanguage, ttsEngine: newTtsEngine, subtitleLanguage: newSubtitleLanguage }),
       });
       const result = await response.json() as { error?: string; job?: LocalJob };
       if (!response.ok || !result.job) throw new Error(result.error ?? "Language generation failed");
@@ -156,6 +177,39 @@ export function VideoDetailView({ job, generationLocked, onBack, onOpenSettings,
       setToast(error instanceof Error ? error.message : "Could not start the language version");
     } finally {
       setVersionCreating(false);
+    }
+  }
+
+  async function regenerateMetadata() {
+    setMetadataRegenerating(true);
+    try {
+      const response = await serviceFetch(`${SERVICE_URL}/jobs/${currentJob.id}/metadata/regenerate`, { method: "POST" });
+      const result = await response.json() as { error?: string; job?: LocalJob };
+      if (!response.ok || !result.job) throw new Error(result.error ?? "Publishing metadata could not be regenerated");
+      setCurrentJob(result.job);
+      setToast("Localized title, description, and publishing copy regenerated");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Publishing metadata could not be regenerated");
+    } finally {
+      setMetadataRegenerating(false);
+    }
+  }
+
+  async function useAsPromptShowcase() {
+    setShowcaseSaving(true);
+    try {
+      const response = await serviceFetch(`${SERVICE_URL}/mode-previews/assign`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modeId: isMessageConversation ? "message-conversation" : "prompt-video", ownerId: currentJob.id }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || "The showcase could not be updated");
+      setToast(isMessageConversation ? "Message Conversation showcase updated" : "Prompt → video showcase updated");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The showcase could not be updated");
+    } finally {
+      setShowcaseSaving(false);
     }
   }
 
@@ -184,7 +238,7 @@ export function VideoDetailView({ job, generationLocked, onBack, onOpenSettings,
     })) }));
     setPublishing(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/jobs/${currentJob.id}/publish`, {
+      const response = await serviceFetch(`${SERVICE_URL}/jobs/${currentJob.id}/publish`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ platforms: platformIds, reuploadPlatforms }),
@@ -224,7 +278,7 @@ export function VideoDetailView({ job, generationLocked, onBack, onOpenSettings,
     if (isDemo) return;
     setReviewing(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/jobs/${currentJob.id}/review`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision }) });
+      const response = await serviceFetch(`${SERVICE_URL}/jobs/${currentJob.id}/review`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision }) });
       const result = await response.json() as { error?: string; job?: LocalJob };
       if (!response.ok || !result.job) throw new Error(result.error ?? "Review could not be saved");
       setCurrentJob(result.job);
@@ -240,7 +294,7 @@ export function VideoDetailView({ job, generationLocked, onBack, onOpenSettings,
     if (isDemo || (currentJob.state !== "failed" && currentJob.state !== "stopped")) return;
     setRetrying(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/jobs/${currentJob.id}/retry`, { method: "POST" });
+      const response = await serviceFetch(`${SERVICE_URL}/jobs/${currentJob.id}/retry`, { method: "POST" });
       const result = await response.json() as { error?: string; job?: LocalJob };
       if (!response.ok || !result.job) throw new Error(result.error ?? "Retry could not start");
       setToast("Failed job queued for retry");
@@ -256,7 +310,7 @@ export function VideoDetailView({ job, generationLocked, onBack, onOpenSettings,
     if (isDemo || (currentJob.state !== "running" && currentJob.state !== "queued") || stopping) return;
     setStopping(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/jobs/${currentJob.id}/stop`, { method: "POST" });
+      const response = await serviceFetch(`${SERVICE_URL}/jobs/${currentJob.id}/stop`, { method: "POST" });
       const result = await response.json() as { error?: string; job?: LocalJob };
       if (!response.ok || !result.job) throw new Error(result.error ?? "Generation could not be stopped");
       setCurrentJob(result.job);
@@ -285,6 +339,8 @@ export function VideoDetailView({ job, generationLocked, onBack, onOpenSettings,
           <span className={`detail-state ${currentJob.state}`}><i />{currentJob.state === "running" ? `${currentJob.progress}% rendering` : currentJob.state}</span>
           {(currentJob.state === "running" || currentJob.state === "queued") && !isDemo && <button className="stop-job-button" onClick={stopCurrentJob} disabled={stopping}><X size={15} /> {stopping ? "Stopping…" : "Stop & unload"}</button>}
           {(currentJob.state === "failed" || currentJob.state === "stopped") && !isDemo && <button className="retry-job-button" onClick={retryJob} disabled={retrying || generationLocked}><RefreshCw size={15} /> {retrying ? "Retrying…" : generationLocked ? "Generation busy" : "Retry render"}</button>}
+          {currentJob.state === "completed" && currentJob.metadata?.publishingCopySource?.error && !isDemo && <button className="metadata-regenerate-button" onClick={() => void regenerateMetadata()} disabled={metadataRegenerating}><RefreshCw size={15} className={metadataRegenerating ? "spin" : ""} /> {metadataRegenerating ? "Regenerating copy…" : "Fix title & copy"}</button>}
+          {currentJob.state === "completed" && currentJob.assets?.final && !isDemo && !isLongVideoPackage && <button className="showcase-action" onClick={useAsPromptShowcase} disabled={showcaseSaving}><Clapperboard size={15} /> {showcaseSaving ? "Updating showcase…" : isMessageConversation ? "Use as Conversation showcase" : "Use as Prompt showcase"}</button>}
           {currentJob.assets?.final && <a href={`${SERVICE_URL}${currentJob.assets.final.downloadUrl}`}><Download size={15} /> Download final</a>}
         </div>
       </div>
@@ -295,28 +351,56 @@ export function VideoDetailView({ job, generationLocked, onBack, onOpenSettings,
 
       <div className="detail-hero-grid">
         <section className="detail-video-card">
-          {currentJob.assets?.final ? <video key={currentJob.assets.final.url} controls playsInline preload="metadata" src={`${SERVICE_URL}${currentJob.assets.final.url}`}>Your browser cannot play this video.</video> : <div className="detail-placeholder"><div className="scene-orb orb-one" /><div className="scene-grid" /><Play size={34} fill="currentColor" /><strong>{isDemo ? "Showcase preview" : "Video is being prepared"}</strong><span>{isDemo ? "Generate a real version to play and download it." : currentJob.message}</span></div>}
+          {currentJob.assets?.final ? <div className="detail-player">
+            <video
+              key={currentJob.assets.final.url}
+              ref={videoRef}
+              aria-label={isMessageConversation ? "Rendered fictional conversation video" : "Rendered video"}
+              controls
+              playsInline
+              preload="metadata"
+              poster={currentJob.assets.thumbnail ? `${SERVICE_URL}${currentJob.assets.thumbnail.url}` : undefined}
+              src={`${SERVICE_URL}${currentJob.assets.final.url}`}
+              onPlay={() => setVideoPlaying(true)}
+              onPause={() => setVideoPlaying(false)}
+              onEnded={() => setVideoPlaying(false)}
+            >Your browser cannot play this video.</video>
+            {!videoPlaying && <button
+              type="button"
+              className="detail-player-play"
+              aria-label={isMessageConversation ? "Play conversation video" : "Play video"}
+              onClick={() => void videoRef.current?.play()}
+            ><Play size={21} fill="currentColor" /><span>{isMessageConversation ? "Play conversation" : "Play video"}</span></button>}
+          </div> : <div className="detail-placeholder"><div className="scene-orb orb-one" /><div className="scene-grid" /><Play size={34} fill="currentColor" /><strong>{isDemo ? "Showcase preview" : "Video is being prepared"}</strong><span>{isDemo ? "Generate a real version to play and download it." : currentJob.message}</span></div>}
           <div className="detail-video-meta"><span><Film size={14} /> 9:16 • {currentJob.metadata?.resolution ?? "1080x1920"}</span><span><Clock3 size={14} /> {durationSeconds || "—"} sec</span><span><Gauge size={14} /> {score || "—"}/100</span></div>
           {currentJob.assets?.thumbnail && <a className="thumbnail-download" href={`${SERVICE_URL}${currentJob.assets.thumbnail.downloadUrl}`}><span className="thumbnail-image" role="img" aria-label="Generated video thumbnail" style={{ backgroundImage: `url(${SERVICE_URL}${currentJob.assets.thumbnail.url})` }} /><span><strong>Generated thumbnail</strong><small>Vertical cover • JPG</small></span><Download size={16} /></a>}
         </section>
 
-        <aside className="language-version-card">
+        {isMessageConversation ? <aside className="language-version-card long-video-package-summary">
+          <div className="detail-card-title"><Clapperboard size={19} /><div><strong>Fictional conversation package</strong><span>Recorded from the approved Reelio phone webpage</span></div></div>
+          <div className="current-version"><span>Current treatment</span><strong>{currentJob.metadata?.conversationParticipants?.join(", ") || "Conversation cast"}</strong><strong>{currentJob.metadata?.conversationTheme} · {currentJob.metadata?.conversationLayout} · {currentJob.metadata?.conversationAudioMode} audio</strong></div>
+          <p>To create another language, return to Message Conversation and use Duplicate &amp; translate so every translated message can be reviewed before rendering.</p>
+        </aside> : !isLongVideoPackage ? <aside className="language-version-card">
           <div className="detail-card-title"><Languages size={19} /><div><strong>Create language version</strong><span>Choose local or Gemini voice generation</span></div></div>
           <SelectField icon={<Mic2 size={15} />} label="Speech / transcript language" value={newSpeechLanguage} onChange={changeVersionSpeechLanguage} options={speechLanguages} disabled={renderLocked} />
           <SelectField icon={<Zap size={15} />} label="Voice engine" value={newTtsEngine} onChange={(value) => setNewTtsEngine(value as TtsEngine)} options={ttsEngineOptions(newSpeechLanguage)} disabled={renderLocked} />
           <SelectField icon={<Languages size={15} />} label="Subtitle language" value={newSubtitleLanguage} onChange={setNewSubtitleLanguage} options={voiceLanguages} disabled={renderLocked} />
           <button className="language-create" onClick={createLanguageVersion} disabled={versionCreating || renderLocked}><WandSparkles size={16} /> {versionCreating ? "Starting…" : renderLocked ? `Generating… ${currentJob.progress}%` : "Generate language version"}</button>
           <div className="current-version"><span>Current version</span><strong>{currentJob.metadata?.narrator ?? "Default narrator"}</strong><strong>{currentJob.request.language} {jobTtsEngineLabel(currentJob)} · {currentJob.request.subtitleLanguage} subtitles</strong></div>
-        </aside>
+        </aside> : <aside className="language-version-card long-video-package-summary">
+          <div className="detail-card-title"><Clapperboard size={19} /><div><strong>Publish-ready short</strong><span>Created from a reviewed long-video highlight</span></div></div>
+          <div className="current-version"><span>Current treatment</span><strong>{currentJob.metadata?.narrator ?? "Default narrator"}</strong><strong>{currentJob.request.language} {jobTtsEngineLabel(currentJob)} · {currentJob.request.subtitleLanguage} subtitles</strong></div>
+          <p>To produce another language or narrator version, return to Long Video to Shorts and choose the new production settings for the reviewed source.</p>
+        </aside>}
       </div>
 
       <section className="detail-workspace">
         <div className="detail-tabs" role="tablist">{detailTabs.map((item) => <button key={item.id} role="tab" aria-selected={tab === item.id} className={tab === item.id ? "active" : ""} onClick={() => setTab(item.id)}>{item.label}</button>)}</div>
 
         {tab === "overview" && <div className="overview-grid">
-          <div className="overview-card"><h3>Package summary</h3><dl><div><dt>Narrator</dt><dd>{currentJob.metadata?.narrator ?? "Default narrator"}</dd></div><div><dt>Voice / transcript</dt><dd>{currentJob.request.language}</dd></div><div><dt>Voice engine</dt><dd>{currentJob.metadata?.voiceProvider ?? "Pending"}</dd></div><div><dt>Subtitle language</dt><dd>{currentJob.request.subtitleLanguage}</dd></div><div><dt>Music</dt><dd>Curated intro, ducked bed, ending lift</dd></div><div><dt>Visual source</dt><dd>{currentJob.metadata?.visualSource ?? "Pending"}</dd></div><div><dt>Output</dt><dd>Vertical H.264 + AAC</dd></div></dl></div>
-          <div className="overview-card"><h3>Retention preflight</h3><div className="retention-detail-score"><strong>{score || "—"}</strong><span>/100</span></div><ul><li><Check size={14} /> Hook at {currentJob.metadata?.retentionPreflight?.hookWithinSeconds ?? "—"}s</li><li><Check size={14} /> Visual change every {currentJob.metadata?.retentionPreflight?.averageVisualChangeSeconds ?? "—"}s</li><li><Check size={14} /> High-contrast safe-zone subtitles</li><li><Check size={14} /> No intro before the hook</li><li><Check size={14} /> {durationSeconds >= 60 ? "60-second retention target covered" : "Short test render"}</li></ul></div>
-          <div className="overview-card wide"><h3>Original brief</h3><p>{currentJob.request.prompt}</p>{currentJob.metadata?.tags?.length ? <div className="tag-list">{currentJob.metadata.tags.map((tag) => <span key={tag}>#{tag}</span>)}</div> : null}</div>
+          <div className="overview-card"><h3>Package summary</h3><dl>{isMessageConversation ? <><div><dt>Participants</dt><dd>{currentJob.metadata?.conversationParticipants?.join(", ") || "Conversation cast"}</dd></div><div><dt>Theme</dt><dd>{currentJob.metadata?.conversationTheme ?? "Reelio"}</dd></div><div><dt>Layout</dt><dd>{currentJob.metadata?.conversationLayout ?? "Phone"}</dd></div><div><dt>Audio</dt><dd>{currentJob.metadata?.conversationAudioMode ?? "Silent"}</dd></div><div><dt>Authenticity</dt><dd>Fictional conversation</dd></div></> : <><div><dt>Narrator</dt><dd>{currentJob.metadata?.narrator ?? "Default narrator"}</dd></div><div><dt>Voice / transcript</dt><dd>{currentJob.request.language}</dd></div><div><dt>Voice engine</dt><dd>{currentJob.metadata?.voiceProvider ?? "Pending"}</dd></div><div><dt>Subtitle language</dt><dd>{currentJob.request.subtitleLanguage}</dd></div>{currentJob.metadata?.languageVersionTiming ? <div><dt>Language timing</dt><dd>{currentJob.metadata.languageVersionTiming.sourceVideoDurationSeconds?.toFixed(1)}s source edit · {currentJob.metadata.languageVersionTiming.speechSpeed?.toFixed(2)}× voice fit</dd></div> : null}<div><dt>Opening</dt><dd>{currentJob.metadata?.titleCardSeconds ? `${currentJob.metadata.titleCardSeconds}s titled thumbnail` : "Immediate hook"}</dd></div></>}<div><dt>Visual source</dt><dd>{currentJob.metadata?.visualSource ?? "Pending"}</dd></div><div><dt>Output</dt><dd>Vertical H.264 + AAC</dd></div></dl></div>
+          <div className="overview-card"><h3>Retention preflight</h3><div className="retention-detail-score"><strong>{score || "—"}</strong><span>/100</span></div><ul><li><Check size={14} /> Hook at {currentJob.metadata?.retentionPreflight?.hookWithinSeconds ?? "—"}s</li><li><Check size={14} /> Visual change every {currentJob.metadata?.retentionPreflight?.averageVisualChangeSeconds ?? "—"}s</li><li><Check size={14} /> High-contrast safe-zone subtitles</li><li><Check size={14} /> {currentJob.metadata?.titleCardSeconds ? `${currentJob.metadata.titleCardSeconds}s editorial title card before the excerpt` : "No intro before the hook"}</li><li><Check size={14} /> {durationSeconds >= 60 ? "60-second retention target covered" : "Short test render"}</li></ul></div>
+          <div className="overview-card wide"><h3>Editorial description</h3><p>{editorialDescription}</p>{currentJob.metadata?.tags?.length ? <div className="tag-list">{currentJob.metadata.tags.map((tag) => <span key={tag}>#{tag}</span>)}</div> : null}</div>
         </div>}
 
         {tab === "transcript" && <TextAssetPanel title={`${currentJob.request.language} transcript`} text={transcript} empty={isDemo ? "Generate a real version to create its matching transcript." : "Transcript will appear when rendering finishes."} download={currentJob.assets?.transcript ? `${SERVICE_URL}${currentJob.assets.transcript.downloadUrl}` : undefined} />}
@@ -357,6 +441,15 @@ export function VideoDetailView({ job, generationLocked, onBack, onOpenSettings,
       </section>
     </div>
   );
+}
+
+function provisionalVideoTitle(value: string) {
+  const rawTitle = String(value || "Untitled video").replace(/\s+/g, " ").trim().split(/(?<=[.!?])\s/)[0]
+    .replace(/^(?:explain|create|show)\s+/i, "");
+  const firstSentence = rawTitle ? `${rawTitle.charAt(0).toUpperCase()}${rawTitle.slice(1)}` : "Untitled video";
+  if (firstSentence.length <= 82) return firstSentence;
+  const shortened = firstSentence.slice(0, 82).replace(/\s+\S*$/, "").trim();
+  return `${shortened || firstSentence.slice(0, 79)}…`;
 }
 
 function TextAssetPanel({ title, text, empty, download }: { title: string; text: string; empty: string; download?: string }) {

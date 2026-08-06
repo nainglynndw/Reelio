@@ -3,8 +3,10 @@ import { access, mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import ffmpegPath from "ffmpeg-static";
 import { getKokoroHealth } from "../local-service/kokoro-client.mjs";
+import { getSttHealth } from "../local-service/stt-client.mjs";
 import { getVoxCpmHealth } from "../local-service/voxcpm-client.mjs";
 import { textProviderConfig } from "../local-service/text-provider.mjs";
+import { conversationBrowserHealth } from "../local-service/conversation-video.mjs";
 
 loadEnv({ path: [".env.local", ".env"], quiet: true });
 
@@ -38,8 +40,14 @@ else process.stdout.write(`TTS   ${voxcpm2.model} / ${voxcpm2.device}\n`);
 const text = textProviderConfig();
 if (!text.ready) warnings.push("No hosted text provider is configured: only English fallback scripts are available. Add GEMINI_API_KEY for multilingual generation.");
 else process.stdout.write(`TEXT  ${text.provider} / ${text.model}\n`);
+const stt = await getSttHealth();
+if (!stt.ready) warnings.push(stt.error);
+else process.stdout.write(`STT   ${stt.provider} / ${stt.model}\n`);
+const conversationRenderer = await conversationBrowserHealth();
+if (!conversationRenderer.ready) warnings.push("Message Conversation preview is available, but final rendering needs npm run conversation:setup.");
+else process.stdout.write(`CHAT  ${conversationRenderer.browser}\n`);
 if (!process.env.PEXELS_API_KEY && !process.env.PIXABAY_API_KEY) {
-  warnings.push("No stock provider is configured: Guided Create can use custom local videos or generated motion backgrounds.");
+  warnings.push("No stock provider is configured: Prompt to Video can use custom local videos or generated motion backgrounds.");
 } else if (!process.env.PEXELS_API_KEY) {
   warnings.push("Pexels is not configured: Pixabay will provide stock fallback.");
 } else if (!process.env.PIXABAY_API_KEY) {

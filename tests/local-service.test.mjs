@@ -4,15 +4,17 @@ import { spawn, spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { allocateStoryboardCandidates, buildAss, buildScriptContext, buildSpeechGroups, buildSrt, buildXfadeChain, chooseDuration, collectStockProviderResults, createLocalVisualThemePlan, createScriptDraft, extractPauses, ffmpegPath, limitPauseMarkers, motionFilter, MUSIC_MIX_LEVELS, normalizeStockClip, planClipQueries, planThemeQueries, planThemeSlots, rankStockCandidates, scriptWordRange, segmentText, styleProfile, validateLanguageText } from "../local-service/pipeline.mjs";
+import ffprobe from "ffprobe-static";
+import { allocateStoryboardCandidates, bilingualPublishingField, buildAss, buildScriptContext, buildSpeechGroups, buildSrt, buildXfadeChain, chooseDuration, collectStockProviderResults, createLocalVisualThemePlan, createScriptDraft, extractPauses, ffmpegPath, fitNarration, hasBilingualPublishingPair, limitPauseMarkers, motionFilter, MUSIC_MIX_LEVELS, narrationFitPlan, normalizeStockClip, planClipQueries, planThemeQueries, planThemeSlots, rankStockCandidates, scriptWordRange, segmentText, styleProfile, summarizePublishingScript, validateLanguageText } from "../local-service/pipeline.mjs";
 import { parseVoiceBlend, selectKokoroVoice } from "../local-service/kokoro-client.mjs";
 import { parseByteRange } from "../local-service/http-utils.mjs";
 import { durationBounds, normalizeVideoRequest, normalizeVoicePreviewRequest, ValidationError } from "../local-service/validation.mjs";
 import { kokoroConfig } from "../local-service/kokoro-client.mjs";
 import { GEMINI_TTS_LANGUAGES, geminiTtsConfig, pcmToWave, selectGeminiTtsVoice } from "../local-service/gemini-tts-client.mjs";
 import { selectVoxCpmSeed, selectVoxCpmVoiceDescription, VOXCPM2_LANGUAGES, voxCpmCalibrationText, voxCpmConfig } from "../local-service/voxcpm-client.mjs";
-import { DEFAULT_GEMINI_TEXT_MODEL, DEFAULT_OPENROUTER_MODEL, normalizeThinkingLevel, textProviderConfig } from "../local-service/text-provider.mjs";
-import { normalizeIdeaOutput } from "../local-service/idea-generator.mjs";
+import { DEFAULT_GEMINI_CONVERSATION_MODEL, DEFAULT_GEMINI_CREATIVE_MODEL, DEFAULT_GEMINI_TEXT_MODEL, DEFAULT_GEMINI_UTILITY_MODEL, DEFAULT_OPENROUTER_MODEL, geminiOutputTokenLimit, googleModelForTask, normalizeThinkingLevel, textProviderConfig, usesDefaultGeminiSampling } from "../local-service/text-provider.mjs";
+import { IDEA_SYSTEM_PROMPT, normalizeIdeaOutput } from "../local-service/idea-generator.mjs";
+import { applyScriptPatches, CONVERSATION_VOICE_EXAMPLE, parseScriptPatches, SCRIPT_VOICE_EXAMPLES } from "../local-service/content-quality.mjs";
 import { JobStoppedError, registerJobProcess, runWithJobControl, stopJobExecution } from "../local-service/job-control.mjs";
 import { buildYouTubeAuthorizationUrl } from "../local-service/youtube-oauth.mjs";
 import { buildTikTokAuthorizationUrl } from "../local-service/tiktok-oauth.mjs";
@@ -22,11 +24,14 @@ import { executeTool, normalizeToolRequest, planChopSegments, TOOL_DEFINITIONS, 
 import { formatSrt, parseSubtitles } from "../local-service/tools/subtitles.mjs";
 import { activeAutomationJob, automationPublishMode, buildCalendarEntries, calendarCronExpressions, normalizeAutomationCreate, normalizeAutomationPatch } from "../local-service/automations.mjs";
 import { normalizeWebMediaUrl, selectWebCaptionTrack } from "../local-service/tools/web-media.mjs";
-import { sttLanguageCode } from "../local-service/stt-client.mjs";
+import { DEFAULT_GEMINI_STT_MODEL, normalizeGeminiTranscript, sttConfig, sttLanguageCode } from "../local-service/stt-client.mjs";
 import { DEFAULT_SCRIPT_STYLE, SCRIPT_STYLES, scriptStyleProfile } from "../local-service/script-styles.mjs";
 import { DEFAULT_NARRATOR_ID, NARRATORS, narratorProfile } from "../local-service/narrators.mjs";
 import { voicePreviewCacheKey } from "../local-service/voice-preview.mjs";
 import { defaultBrandKit, publicBrandKit, updateBrandKit, validateBrandAssetUpload, BrandKitError } from "../local-service/brand-kit.mjs";
+import { assembleNarratedShort, buildShortAss, buildShortThumbnailAss, DEFAULT_LONG_VIDEO_TITLE_CARD_SECONDS, longVideoTitleCardSeconds, normalizeHighlightCandidates, renderLongVideoShorts, validateLongVideoAnalyzeOptions, validateLongVideoRenderOptions } from "../local-service/tools/long-video.mjs";
+import { buildConversationDocument, buildConversationTimeline, buildConversationTypingSequence, compileConversationStoryItems, conversationAssetIds, conversationReceiptAt, conversationSoundEvents, defaultConversationDraft, normalizeConversationDraft, recommendedConversationTypingMs, renderConversationEffects, renderConversationMusic } from "../local-service/conversation-video.mjs";
+import { curatedConversationPitches, guidedConversationPitch, normalizeStarterCriteria, parseConversationPitches } from "../local-service/conversation-starters.mjs";
 
 function restoreEnv(name, value) {
   if (value === undefined) delete process.env[name];
@@ -34,12 +39,67 @@ function restoreEnv(name, value) {
 }
 
 test("uses Google Gemini as the primary multilingual text provider with OpenRouter fallback", () => {
-  assert.equal(DEFAULT_GEMINI_TEXT_MODEL, "gemini-3.5-flash");
+  assert.equal(DEFAULT_GEMINI_TEXT_MODEL, "gemini-3.6-flash");
+  assert.equal(DEFAULT_GEMINI_CREATIVE_MODEL, "gemini-3.6-flash");
+  assert.equal(DEFAULT_GEMINI_CONVERSATION_MODEL, "gemini-3.6-flash");
+  assert.equal(DEFAULT_GEMINI_UTILITY_MODEL, "gemini-3.5-flash-lite");
   assert.equal(DEFAULT_OPENROUTER_MODEL, "google/gemma-4-31b-it:free");
   assert.equal(textProviderConfig().preferred, "google");
-  assert.match(textProviderConfig().model, /gemini-3.5-flash|gemma-4-31b-it:free|built-in English fallback/);
+  assert.match(textProviderConfig().model, /gemini-|gemma-4-31b-it:free|built-in English fallback/);
   assert.equal(normalizeThinkingLevel("high"), "high");
   assert.equal(normalizeThinkingLevel("invalid"), "medium");
+});
+
+test("routes creative and utility Gemini work independently with bounded output", () => {
+  const previous = {
+    shared: process.env.GEMINI_TEXT_MODEL,
+    creative: process.env.GEMINI_CREATIVE_MODEL,
+    conversation: process.env.GEMINI_CONVERSATION_MODEL,
+    utility: process.env.GEMINI_UTILITY_MODEL,
+  };
+  delete process.env.GEMINI_TEXT_MODEL;
+  delete process.env.GEMINI_CREATIVE_MODEL;
+  delete process.env.GEMINI_CONVERSATION_MODEL;
+  delete process.env.GEMINI_UTILITY_MODEL;
+  try {
+    assert.equal(googleModelForTask("creative"), "gemini-3.6-flash");
+    assert.equal(googleModelForTask("conversation"), "gemini-3.6-flash");
+    assert.equal(googleModelForTask("research"), "gemini-3.6-flash");
+    assert.equal(googleModelForTask("utility"), "gemini-3.5-flash-lite");
+    process.env.GEMINI_TEXT_MODEL = "shared-model";
+    process.env.GEMINI_CREATIVE_MODEL = "creative-model";
+    process.env.GEMINI_CONVERSATION_MODEL = "conversation-model";
+    process.env.GEMINI_UTILITY_MODEL = "utility-model";
+    assert.equal(googleModelForTask("creative"), "creative-model");
+    assert.equal(googleModelForTask("conversation"), "conversation-model");
+    assert.equal(googleModelForTask("utility"), "utility-model");
+  } finally {
+    restoreEnv("GEMINI_TEXT_MODEL", previous.shared);
+    restoreEnv("GEMINI_CREATIVE_MODEL", previous.creative);
+    restoreEnv("GEMINI_CONVERSATION_MODEL", previous.conversation);
+    restoreEnv("GEMINI_UTILITY_MODEL", previous.utility);
+  }
+  assert.equal(usesDefaultGeminiSampling("gemini-3.6-flash"), true);
+  assert.equal(usesDefaultGeminiSampling("gemini-2.5-flash"), false);
+  assert.equal(geminiOutputTokenLimit(200, "high"), 800);
+  assert.equal(geminiOutputTokenLimit(200, "minimal"), 512);
+  assert.equal(geminiOutputTokenLimit(20_000, "high"), 16_384);
+});
+
+test("uses examples for creative calibration and applies only narrow exact editorial patches", () => {
+  assert.match(IDEA_SYSTEM_PROMPT, /Weak:/);
+  assert.match(IDEA_SYSTEM_PROMPT, /Strong:/);
+  assert.match(SCRIPT_VOICE_EXAMPLES, /Taipei 101/);
+  assert.match(CONVERSATION_VOICE_EXAMPLE, /speech|Mara is direct/i);
+
+  const parsed = parseScriptPatches("```json\n[{\"find\":\"changes everything\",\"replace\":\"changes the result under these conditions\",\"reason\":\"Avoid empty hype\"}]\n```");
+  const result = applyScriptPatches("This changes everything. Keep this detail.", parsed);
+  assert.equal(result.text, "This changes the result under these conditions. Keep this detail.");
+  assert.equal(result.applied.length, 1);
+
+  const ambiguous = applyScriptPatches("same and same", [{ find: "same", replace: "different", reason: "Ambiguous" }]);
+  assert.equal(ambiguous.text, "same and same");
+  assert.equal(ambiguous.rejected.length, 1);
 });
 
 test("keeps grounded specifics and the angle plan inside the script context", () => {
@@ -328,6 +388,284 @@ test("bundles an FFmpeg build with subtitle rendering", async () => {
   assert.match(result.stdout, /subtitles\s+V->V/);
 });
 
+test("normalizes fictional message conversations and builds one deterministic timeline", () => {
+  const draft = defaultConversationDraft("owner-1");
+  const normalized = normalizeConversationDraft(draft, { ownerUserId: "owner-1" });
+  const timeline = buildConversationTimeline(normalized);
+  assert.equal(normalized.authenticity, "fictional");
+  assert.equal(normalized.participants.filter((participant) => participant.isSelf).length, 1);
+  assert.equal(timeline.entries.length, normalized.events.length);
+  assert.ok(timeline.durationMs >= 6_000);
+  assert.equal(timeline.entries[0].eventId, normalized.events[0].id);
+  assert.ok(timeline.entries[0].typingStartMs < 1_000, "the first visible activity should start in under one second");
+  assert.ok(timeline.entries.every((entry, index) => index === 0 || entry.startMs > timeline.entries[index - 1].startMs));
+});
+
+test("keeps human typing pace and allows complete conversations beyond three minutes", () => {
+  const draft = defaultConversationDraft("owner-long-conversation");
+  draft.events[0].typingMs = 250;
+  draft.events[1].text = draft.events[0].text;
+  draft.events[1].typingMs = 250;
+  draft.events[1].typingStyle = draft.events[0].typingStyle;
+  let normalized = normalizeConversationDraft(draft, { ownerUserId: "owner-long-conversation" });
+  assert.ok(normalized.events[0].typingMs >= 2_000, "natural typing is raised to a brisk readable minimum");
+  assert.ok(normalized.events[1].typingMs < normalized.events[0].typingMs, "the phone owner types faster than an incoming participant");
+  assert.ok(recommendedConversationTypingMs("Quick answer.", "fast", true) < 700, "short phone-owner replies stay brisk");
+  draft.events.forEach((event) => {
+    event.typingMs = 70_000;
+    event.holdMs = 2_000;
+  });
+  normalized = normalizeConversationDraft(draft, { ownerUserId: "owner-long-conversation" });
+  assert.ok(buildConversationTimeline(normalized).durationMs > 180_000);
+});
+
+test("builds deterministic grapheme typing with variable intervals, pauses, and corrections", () => {
+  const event = {
+    id: "typing-realism",
+    type: "text",
+    text: "👨‍👩‍👧‍👦 Wait, no. Send the blue one.",
+    typingMs: 5_200,
+    typingStyle: "hesitant",
+    deleted: false,
+  };
+  const first = buildConversationTypingSequence(event);
+  const second = buildConversationTypingSequence(event);
+  assert.deepEqual(first, second);
+  assert.equal(first.checkpoints.at(-1).text, event.text);
+  assert.ok(first.correctionCount >= 1);
+  assert.ok(first.pauseCount >= 1);
+  assert.ok(first.checkpoints.some((point) => point.action === "backspace"));
+  assert.equal(first.checkpoints.find((point) => point.text)?.text, "👨‍👩‍👧‍👦", "emoji sequences remain one typed grapheme");
+  const intervals = first.checkpoints.slice(1).map((point, index) => point.atMs - first.checkpoints[index].atMs);
+  assert.ok(new Set(intervals).size > 4, "typing intervals must not be mechanically uniform");
+  const differentEvent = buildConversationTypingSequence({ ...event, id: "typing-realism-2" });
+  assert.notDeepEqual(first.checkpoints.map((point) => point.atMs), differentEvent.checkpoints.map((point) => point.atMs));
+});
+
+test("compiles story-first dialogue into local production timing and phone metadata", () => {
+  const draft = defaultConversationDraft("owner-story-compiler");
+  const self = draft.participants.find((participant) => participant.isSelf);
+  const other = draft.participants.find((participant) => !participant.isSelf);
+  const items = [
+    { type: "text", participantId: other.id, text: "The client opened our rehearsal deck.", typingStyle: "natural" },
+    { type: "text", participantId: self.id, text: "The one with the fake prices?", typingStyle: "fast" },
+    { type: "text", participantId: other.id, text: "And your slide titled DO NOT PRESENT.", typingStyle: "natural" },
+    { type: "notification", participantId: other.id, notificationTitle: "Client", text: "Can we discuss slide seven?", chatId: "client" },
+    { type: "chat-switch", text: "Client", chatId: "client", chatTitle: "Client" },
+    { type: "text", participantId: self.id, text: "Slide seven is an internal stress test.", typingStyle: "clean", chatId: "client", chatTitle: "Client" },
+  ];
+  const compiled = compileConversationStoryItems(items, draft);
+  assert.equal(compiled.length, items.length);
+  assert.ok(compiled.every((event) => Number.isInteger(event.delayBeforeMs) && Number.isInteger(event.holdMs)));
+  assert.ok(compiled[0].typingMs > compiled[1].typingMs, "the local compiler keeps the phone owner brisk");
+  assert.equal(compiled[0].receipt, "none");
+  assert.equal(compiled[1].receipt, "delivered");
+  assert.equal(compiled[3].typingMs, 0);
+  assert.match(compiled[0].displayTime, /^\d{2}:\d{2}$/);
+  const normalized = normalizeConversationDraft({ ...draft, events: compiled }, { ownerUserId: "owner-story-compiler" });
+  assert.equal(normalized.events[4].chatId, "client");
+});
+
+test("normalizes notifications, low battery alerts, phone dialogue, and chat switching", () => {
+  const draft = defaultConversationDraft("owner-phone-events");
+  const self = draft.participants.find((participant) => participant.isSelf);
+  const other = draft.participants.find((participant) => !participant.isSelf);
+  draft.events.push(
+    {
+      id: "notify-second-chat", type: "notification", participantId: other.id, text: "Do not open that file.", notificationTitle: "Alex · Side chat",
+      chatId: "side-chat", chatTitle: "Side chat", delayBeforeMs: 300, typingMs: 0, typingStyle: "natural", holdMs: 2_400, displayTime: "19:44",
+      receipt: "none", reactions: [], edited: false, deleted: false, playAudio: false, callDialogue: [], charging: false,
+    },
+    {
+      id: "battery-low", type: "battery", participantId: null, text: "", batteryLevel: 7, charging: false,
+      chatId: "primary", chatTitle: "", delayBeforeMs: 200, typingMs: 0, typingStyle: "natural", holdMs: 2_800, displayTime: "19:44",
+      receipt: "none", reactions: [], edited: false, deleted: false, playAudio: false, callDialogue: [], notificationTitle: "",
+    },
+    {
+      id: "switch-side-chat", type: "chat-switch", participantId: null, text: "Side chat", chatId: "side-chat", chatTitle: "Side chat",
+      delayBeforeMs: 150, typingMs: 0, typingStyle: "natural", holdMs: 700, displayTime: "19:44", receipt: "none", reactions: [],
+      edited: false, deleted: false, playAudio: false, callDialogue: [], notificationTitle: "", charging: false,
+    },
+    {
+      id: "connected-call", type: "call", participantId: other.id, text: "Phone call", callState: "completed", chatId: "side-chat", chatTitle: "Side chat",
+      callDialogue: [
+        { id: "call-one", participantId: other.id, text: "Can you hear me?", delayMs: 600 },
+        { id: "call-two", participantId: self.id, text: "Barely. I have seven percent.", delayMs: 450 },
+      ],
+      delayBeforeMs: 300, typingMs: 0, typingStyle: "natural", holdMs: 8_000, displayTime: "19:45", receipt: "none", reactions: [],
+      edited: false, deleted: false, playAudio: false, notificationTitle: "", charging: false,
+    },
+  );
+  const normalized = normalizeConversationDraft(draft, { ownerUserId: "owner-phone-events" });
+  const timeline = buildConversationTimeline(normalized);
+  assert.equal(normalized.events.find((event) => event.type === "battery").batteryLevel, 7);
+  assert.equal(normalized.events.find((event) => event.type === "call").callDialogue.length, 2);
+  assert.equal(timeline.entries.find((entry) => entry.eventId === "switch-side-chat").chatId, "side-chat");
+  const sounds = conversationSoundEvents(normalized, timeline);
+  assert.ok(sounds.some((sound) => sound.kind === "notification"));
+  assert.ok(sounds.some((sound) => sound.kind === "battery"));
+  assert.ok(sounds.some((sound) => sound.kind === "switch"));
+  const html = buildConversationDocument(normalized, timeline);
+  assert.match(html, /function activeChatAt\(ms\)/);
+  assert.match(html, /notification-banner/);
+  assert.match(html, /battery-alert/);
+  assert.match(html, /call-screen/);
+  assert.match(html, /callDialogueAt/);
+  assert.match(html, /composerText\.textContent=typingText/);
+});
+
+test("offers guided and provider-independent conversation story starters before drafting", () => {
+  const criteria = normalizeStarterCriteria({
+    relationship: "Coworkers",
+    genre: "Comedy",
+    situation: "Wrong recipient",
+    endingStyle: "Comic reversal",
+    participantCount: 2,
+    targetSeconds: 55,
+  });
+  assert.equal(criteria.relationship, "Coworkers");
+  assert.equal(criteria.targetSeconds, 55);
+  assert.equal(normalizeStarterCriteria({ targetSeconds: 900 }).targetSeconds, 900);
+  assert.equal(normalizeStarterCriteria({ targetSeconds: "not-a-number", participantCount: 99 }).targetSeconds, 60);
+  assert.equal(normalizeStarterCriteria({ participantCount: 99 }).participantCount, 12);
+  const guided = guidedConversationPitch(criteria);
+  assert.match(guided.premise, /coworkers/i);
+  assert.match(guided.premise, /message reaches/i);
+
+  const curated = curatedConversationPitches(criteria);
+  assert.equal(curated.length, 3);
+  assert.equal(new Set(curated.map((pitch) => pitch.id)).size, 3);
+  assert.equal(curated[0].relationship, "Coworkers");
+  assert.ok(curated.every((pitch) => pitch.premise.length >= 20));
+
+  const generated = parseConversationPitches(JSON.stringify([
+    { id: "one", title: "Specific one", premise: "Two siblings compare the same scheduled message and discover one copy contains a newly added detail.", relationship: "Siblings", genre: "Drama", situation: "Old promise", ending: "One sibling admits why the message changed.", tone: "quiet, precise, sincere", cast: [{ name: "Ada", role: "phone owner who notices details", isSelf: true }, { name: "Milo", role: "sibling who avoids direct answers", isSelf: false }] },
+    { id: "two", title: "Specific two", premise: "Two coworkers trace a mistaken attachment while the intended recipient begins responding to comments hidden inside it.", relationship: "Coworkers", genre: "Suspense", situation: "Wrong recipient", ending: "They choose to acknowledge the mistake together.", tone: "urgent, dry, restrained", cast: [] },
+    { id: "three", title: "Specific three", premise: "Two strangers negotiate a package swap while each avoids naming the nearly identical item they ordered.", relationship: "Strangers", genre: "Comedy", situation: "Misunderstanding", ending: "Both finally name the item at once.", tone: "wary, deadpan, playful", cast: [] },
+  ]), { participantCount: 2 });
+  assert.equal(generated.length, 3);
+  assert.equal(generated[0].cast[0].isSelf, true);
+  assert.deepEqual(parseConversationPitches("not json"), []);
+});
+
+test("progresses outgoing receipts and renders audible conversation effects", async () => {
+  const normalized = normalizeConversationDraft(defaultConversationDraft("owner-audio"), { ownerUserId: "owner-audio" });
+  const timeline = buildConversationTimeline(normalized);
+  const outgoing = normalized.events.find((event) => event.receipt === "read");
+  const entry = timeline.entries.find((item) => item.eventId === outgoing.id);
+  assert.equal(conversationReceiptAt(outgoing, entry, entry.startMs), "sent");
+  assert.equal(conversationReceiptAt(outgoing, entry, entry.deliveredMs), "delivered");
+  assert.equal(conversationReceiptAt(outgoing, entry, entry.readMs), "read");
+  const sounds = conversationSoundEvents(normalized, timeline);
+  assert.ok(sounds.some((sound) => sound.kind === "incoming"));
+  assert.ok(sounds.some((sound) => sound.kind === "outgoing"));
+  assert.ok(sounds.some((sound) => sound.kind === "read"));
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "reelio-conversation-effects-"));
+  try {
+    const output = path.join(outputDir, "effects.m4a");
+    await renderConversationEffects(normalized, timeline, output);
+    assert.ok((await stat(output)).size > 2_000);
+    const measured = spawnSync(ffmpegPath, ["-i", output, "-af", "volumedetect", "-f", "null", "-"], { encoding: "utf8" });
+    assert.equal(measured.status, 0);
+    const maxVolume = Number(/max_volume:\s*(-?[\d.]+)\s*dB/.exec(measured.stderr)?.[1]);
+    assert.ok(Number.isFinite(maxVolume) && maxVolume > -30, `expected audible effects, received ${maxVolume} dB`);
+  } finally {
+    await rm(outputDir, { recursive: true, force: true });
+  }
+});
+
+test("validates character casts, event references, limits, and local conversation assets", () => {
+  const draft = defaultConversationDraft("owner-1");
+  draft.audio.mode = "characters";
+  draft.participants[1].narratorId = draft.participants[0].narratorId;
+  assert.throws(() => normalizeConversationDraft(draft, { ownerUserId: "owner-1" }), /distinct Reelio voice/);
+  draft.participants[1].narratorId = "theo";
+  draft.events[1].replyToEventId = draft.events[2].id;
+  assert.throws(() => normalizeConversationDraft(draft, { ownerUserId: "owner-1" }), /reply to an earlier event/);
+  draft.events[1].replyToEventId = draft.events[0].id;
+  draft.events[0].assetId = "asset-1";
+  draft.events[0].type = "image";
+  assert.deepEqual(conversationAssetIds(normalizeConversationDraft(draft, { ownerUserId: "owner-1" })), ["asset-1"]);
+  draft.events[0].displayTime = "20:00";
+  draft.events[1].displayTime = "19:59";
+  assert.throws(() => normalizeConversationDraft(draft, { ownerUserId: "owner-1" }), /must not move backward/);
+  draft.events[0].displayTime = "23:59";
+  draft.events[1].displayTime = "00:00";
+  draft.events[2].displayTime = "00:01";
+  assert.doesNotThrow(() => normalizeConversationDraft(draft, { ownerUserId: "owner-1" }), "midnight rollover remains monotonic");
+});
+
+test("snapshots a creator-selected local soundtrack as a conversation asset", () => {
+  const draft = defaultConversationDraft("owner-music");
+  draft.audio.musicEnabled = true;
+  draft.audio.musicSource = "upload";
+  draft.audio.musicAssetId = "soundtrack-1";
+  const normalized = normalizeConversationDraft(draft, { ownerUserId: "owner-music" });
+  assert.equal(normalized.audio.musicSource, "upload");
+  assert.equal(normalized.audio.musicEnabled, true);
+  assert.ok(conversationAssetIds(normalized).includes("soundtrack-1"));
+  const legacy = defaultConversationDraft("owner-legacy-music");
+  delete legacy.audio.musicSource;
+  legacy.audio.musicEnabled = true;
+  assert.equal(normalizeConversationDraft(legacy, { ownerUserId: "owner-legacy-music" }).audio.musicSource, "brand");
+});
+
+test("loops selected music across the complete conversation duration", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "reelio-conversation-music-"));
+  try {
+    const input = path.join(outputDir, "short-tone.wav");
+    const output = path.join(outputDir, "full-music.m4a");
+    const generated = spawnSync(ffmpegPath, ["-y", "-f", "lavfi", "-i", "sine=frequency=220:duration=0.35", "-c:a", "pcm_s16le", input], { encoding: "utf8" });
+    assert.equal(generated.status, 0);
+    await renderConversationMusic(input, 3.4, 0.2, output);
+    const probe = spawnSync(ffprobe.path, ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", output], { encoding: "utf8" });
+    assert.equal(probe.status, 0);
+    assert.ok(Number(probe.stdout.trim()) >= 3.35);
+  } finally {
+    await rm(outputDir, { recursive: true, force: true });
+  }
+});
+
+test("builds a self-contained conversation webpage without executing authored text", () => {
+  const draft = defaultConversationDraft("owner-1");
+  draft.events[0].text = `<script>window.compromised=true</script> ❤️`;
+  const normalized = normalizeConversationDraft(draft, { ownerUserId: "owner-1" });
+  const html = buildConversationDocument(normalized, buildConversationTimeline(normalized), { assetUrls: {} });
+  assert.match(html, /Fictional conversation · Reelio/);
+  assert.match(html, /window\.__reelioConversation/);
+  assert.match(html, /textContent/);
+  assert.match(html, /function visualSignature\(ms\)/);
+  assert.match(html, /function receiptAt\(event,entry,ms\)/);
+  assert.match(html, /reelio-conversation-sfx/);
+  assert.match(html, /previewMusic/);
+  assert.match(html, /animatedEvents=new Set/);
+  assert.match(html, /signature===lastHeaderSignature/);
+  assert.match(html, /function displayedClockAt\(ms\)/);
+  assert.match(html, /C\.events\.find\(event=>event\.displayTime\)/);
+  assert.match(html, /ms<entry\.typingStartMs/);
+  assert.match(html, /clockLabel\(displayedClock,C\.clock\.format\)/);
+  assert.match(html, /\.device #phoneHeader\{border-radius:30px 30px 0 0;overflow:hidden\}/);
+  assert.match(html, /white-space:pre-wrap;overflow-wrap:anywhere/);
+  assert.match(html, /composerText\.scrollTop=composerText\.scrollHeight/);
+  assert.match(html, /\.event\.stable\{animation:none\}/);
+  assert.match(html, /el\('div','statusbar'\)/);
+  assert.match(html, /el\('div','chat-nav'\)/);
+  assert.doesNotMatch(html, /animation:blink/);
+  assert.match(html, /if\(signature===lastVisualSignature\)\{postTime\(\);return currentMs\}/);
+  assert.match(html, /function scheduleTick\(\)\{frameTimer=setTimeout/);
+  assert.doesNotMatch(html, /<script>window\.compromised=true<\/script>/);
+  assert.match(html, /connect-src 'none'/);
+  assert.doesNotMatch(html, /owner-1/);
+  const rtl = defaultConversationDraft("owner-rtl");
+  rtl.language = "Arabic";
+  rtl.audio.mode = "silent";
+  const rtlHtml = buildConversationDocument(
+    normalizeConversationDraft(rtl, { ownerUserId: "owner-rtl" }),
+    buildConversationTimeline(rtl),
+  );
+  assert.match(rtlHtml, /dir="rtl"/);
+});
+
 test("exposes independently runnable local and link media tools with validated inputs", () => {
   assert.deepEqual(TOOL_DEFINITIONS.map(({ id }) => id), [
     "chop",
@@ -335,6 +673,8 @@ test("exposes independently runnable local and link media tools with validated i
     "extract-audio",
     "extract-subtitles",
     "extract-web-captions",
+    "long-video-analyze",
+    "long-video-render",
     "transcribe",
     "translate",
     "speech-synthesis",
@@ -362,6 +702,196 @@ test("exposes independently runnable local and link media tools with validated i
   assert.throws(() => normalizeToolRequest({ toolId: "chop", inputs: { video: { uploadId: "v" } }, options: { clipSeconds: 180, overlapSeconds: 180 } }), /between 0 and 179/);
   assert.throws(() => normalizeToolRequest({ toolId: "speech-synthesis", inputs: { subtitles: { uploadId: "subtitles-1" } }, options: { narratorId: "unknown" } }), /supported narrator/);
   assert.throws(() => normalizeToolRequest({ toolId: "download-media", inputs: {}, options: { url: "http://example.com/video" } }), /public HTTPS/);
+  assert.throws(() => normalizeToolRequest({ toolId: "long-video-analyze", inputs: { media: { uploadId: "v" } }, options: {} }), /own or are licensed/);
+  const longAnalysis = normalizeToolRequest({
+    toolId: "long-video-analyze",
+    inputs: { media: { uploadId: "v" } },
+    options: { rightsConfirmed: true, cloudConsent: true, maxClips: 4, minClipSeconds: 20, maxClipSeconds: 50 },
+  });
+  assert.equal(longAnalysis.options.maxClips, 4);
+  assert.equal(longAnalysis.options.cloudConsent, true);
+  assert.throws(() => normalizeToolRequest({
+    toolId: "long-video-render",
+    inputs: { media: { uploadId: "v" }, analysis: { uploadId: "a" } },
+    options: { rightsConfirmed: true, mirror: true },
+  }), /creative remix edits/);
+});
+
+test("normalizes coherent long-video highlights and enforces explicit consent", () => {
+  const cues = [
+    { start: 0, end: 6, text: "The setup starts here." },
+    { start: 6, end: 14, text: "A concrete example explains the problem." },
+    { start: 14, end: 24, text: "The result provides a complete payoff." },
+    { start: 25, end: 33, text: "A separate moment begins." },
+  ];
+  const candidates = normalizeHighlightCandidates([
+    { start: 1, end: 22, title: "Complete explanation", hook: "Why this works", description: "The short explains the concrete example and follows it through to the result.", score: 91, reason: "Clear setup and payoff." },
+    { start: 2, end: 21, title: "Duplicate", hook: "Same moment", score: 80, reason: "Overlaps." },
+  ], cues, { duration: 34, maxClips: 5, minClipSeconds: 15, maxClipSeconds: 30 });
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].start, 0);
+  assert.equal(candidates[0].end, 24);
+  assert.match(candidates[0].transcript, /complete payoff/);
+  assert.match(candidates[0].description, /follows it through/);
+  assert.throws(() => validateLongVideoAnalyzeOptions({ cloudConsent: true }), /own or are licensed/);
+  assert.throws(() => validateLongVideoAnalyzeOptions({ rightsConfirmed: true }), /transcript may be sent/);
+  assert.throws(() => validateLongVideoRenderOptions({ rightsConfirmed: true, transitions: true }), /creative remix/);
+  assert.equal(validateLongVideoRenderOptions({ rightsConfirmed: true, transitions: true, remixConfirmed: true }).transitions, true);
+  const publishable = validateLongVideoRenderOptions({
+    rightsConfirmed: true,
+    packageTreatment: true,
+    speechLanguage: "Spanish",
+    subtitleLanguage: "French",
+    ttsEngine: "gemini",
+    narratorId: "ellis",
+    platforms: ["youtube", "instagram"],
+    candidates: [{ id: "highlight-01", start: 0, end: 24, title: "Complete explanation", transcript: "Reviewed source meaning.", framing: "center" }],
+  });
+  assert.equal(publishable.packageTreatment, true);
+  assert.equal(publishable.speechLanguage, "Spanish");
+  assert.equal(publishable.subtitleLanguage, "French");
+  assert.equal(publishable.narratorId, "ellis");
+  assert.deepEqual(publishable.platforms, ["youtube", "instagram"]);
+  assert.equal(publishable.candidates[0].transcript, "Reviewed source meaning.");
+  const ass = buildShortAss({ cues, duration: 24, hook: "A hook that wraps across several words", includeCaptions: true });
+  assert.match(ass, /Style: Hook/);
+  assert.match(ass, /The setup starts here/);
+  assert.match(ass, /\\N/);
+});
+
+test("keeps localized publishing metadata first and summarizes beyond the opening line", () => {
+  assert.equal(
+    bilingualPublishingField("မြန်မာခေါင်းစဉ်", "English title"),
+    "မြန်မာခေါင်းစဉ်\n\nEnglish title",
+  );
+  assert.equal(bilingualPublishingField("Same title", "Same title"), "Same title");
+  assert.equal(hasBilingualPublishingPair("မြန်မာခေါင်းစဉ်\n\nEnglish title"), true);
+  assert.equal(hasBilingualPublishingPair("English only"), false);
+  const description = summarizePublishingScript("This is only the opening hook. The explanation establishes the mechanism. The ending reveals why the result matters.");
+  assert.doesNotMatch(description, /only the opening hook/);
+  assert.match(description, /establishes the mechanism/);
+  assert.match(description, /why the result matters/);
+});
+
+test("builds a titled thumbnail treatment for every generated short", () => {
+  const ass = buildShortThumbnailAss({ title: "The Moment of Truth", hook: "No telemetry. Just wait.", brand: { fontFamily: "Arial", accentColor: "#7c5cff" } });
+  assert.match(ass, /REELIO HIGHLIGHT/);
+  assert.match(ass, /The Moment of Truth/);
+  assert.match(ass, /No telemetry\. Just wait\./);
+  assert.equal(DEFAULT_LONG_VIDEO_TITLE_CARD_SECONDS, 1.5);
+  assert.equal(longVideoTitleCardSeconds(), 1.5);
+  assert.equal(longVideoTitleCardSeconds(0.2), 1);
+  assert.equal(longVideoTitleCardSeconds(9), 2);
+});
+
+test("prepends the titled thumbnail and shifts publishable-short audio", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "reelio-title-card-"));
+  const clean = path.join(directory, "clean.mp4");
+  const voice = path.join(directory, "voice.m4a");
+  const music = path.join(directory, "music.m4a");
+  const thumbnail = path.join(directory, "thumbnail.jpg");
+  const captions = path.join(directory, "captions.ass");
+  const output = path.join(directory, "final.mp4");
+  try {
+    const cleanResult = spawnSync(ffmpegPath, [
+      "-y", "-f", "lavfi", "-i", "color=c=0x253040:size=180x320:rate=30",
+      "-f", "lavfi", "-i", "sine=frequency=360:sample_rate=48000",
+      "-t", "3", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", clean,
+    ], { encoding: "utf8" });
+    assert.equal(cleanResult.status, 0, cleanResult.stderr);
+    for (const [file, frequency, duration] of [[voice, 620, 2.8], [music, 220, 4.5]]) {
+      const audioResult = spawnSync(ffmpegPath, [
+        "-y", "-f", "lavfi", "-i", `sine=frequency=${frequency}:sample_rate=48000`,
+        "-t", String(duration), "-c:a", "aac", file,
+      ], { encoding: "utf8" });
+      assert.equal(audioResult.status, 0, audioResult.stderr);
+    }
+    const thumbnailResult = spawnSync(ffmpegPath, [
+      "-y", "-f", "lavfi", "-i", "color=c=0x6f4bf3:size=180x320", "-frames:v", "1", thumbnail,
+    ], { encoding: "utf8" });
+    assert.equal(thumbnailResult.status, 0, thumbnailResult.stderr);
+    await writeFile(captions, buildShortAss({
+      cues: [{ start: 0.2, end: 2.7, text: "Narration begins after the title card." }],
+      duration: 3,
+      hook: "A fresh editorial title",
+      includeCaptions: true,
+    }));
+    await assembleNarratedShort({
+      cleanPath: clean,
+      voicePath: voice,
+      musicPath: music,
+      thumbnailPath: thumbnail,
+      captionsPath: captions,
+      outputPath: output,
+      duration: 3,
+      titleCardSeconds: 1.5,
+      includeCaptions: true,
+      mixOriginalAudio: true,
+    });
+    const probe = spawnSync(ffprobe.path, [
+      "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", output,
+    ], { encoding: "utf8" });
+    assert.equal(probe.status, 0, probe.stderr);
+    assert.ok(Number(probe.stdout.trim()) >= 4.45);
+    assert.ok((await stat(output)).size > 5_000);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("renders a reviewed long-video highlight through real FFmpeg", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "reelio-long-video-"));
+  const input = path.join(directory, "source.mp4");
+  const analysis = path.join(directory, "analysis.json");
+  const outputDir = path.join(directory, "outputs");
+  const previousWidth = process.env.REELIO_SHORT_WIDTH;
+  const previousHeight = process.env.REELIO_SHORT_HEIGHT;
+  try {
+    const generated = spawnSync(ffmpegPath, [
+      "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=15",
+      "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+      "-t", "8.5", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+      "-c:a", "aac", "-shortest", input,
+    ], { encoding: "utf8" });
+    assert.equal(generated.status, 0, generated.stderr);
+    await writeFile(analysis, JSON.stringify({
+      version: 1,
+      cues: [
+        { start: 0.2, end: 3.8, text: "A complete opening line." },
+        { start: 3.8, end: 8.2, text: "The example reaches its payoff." },
+      ],
+      candidates: [{ id: "highlight-01", title: "Smoke test", hook: "Watch the full moment", start: 0.1, end: 8.4, score: 90, reason: "Test" }],
+    }));
+    process.env.REELIO_SHORT_WIDTH = "180";
+    process.env.REELIO_SHORT_HEIGHT = "320";
+    const result = await renderLongVideoShorts({
+      mediaFile: input,
+      analysisFile: analysis,
+      outputDir,
+      options: validateLongVideoRenderOptions({
+        rightsConfirmed: true,
+        packageTreatment: false,
+        captions: true,
+        applyBrandKit: false,
+        candidates: [{ id: "highlight-01", selected: true, start: 0.1, end: 8.4, title: "Smoke test", hook: "Watch the full moment", framing: "center" }],
+      }),
+      progress: async () => {},
+    });
+    assert.equal(result.metadata.clipCount, 1);
+    assert.equal(result.assets.short01.type, "video");
+    assert.equal(result.assets.short01Thumbnail.type, "image");
+    assert.equal(result.metadata.clips[0].thumbnailAssetKey, "short01Thumbnail");
+    assert.equal(result.metadata.clips[0].titleCardSeconds, 1.5);
+    assert.ok(result.metadata.clips[0].duration > 9.7);
+    assert.match(result.assets.short01.name, /smoke-test\.mp4$/i);
+    assert.ok((await stat(result.assets.short01.file)).size > 10_000);
+    assert.ok((await stat(result.assets.short01Thumbnail.file)).size > 1_000);
+    await access(result.assets.manifest.file);
+  } finally {
+    restoreEnv("REELIO_SHORT_WIDTH", previousWidth);
+    restoreEnv("REELIO_SHORT_HEIGHT", previousHeight);
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("accepts public link-tool URLs and blocks private-network targets", () => {
@@ -406,7 +936,47 @@ test("parses SRT and VTT subtitles and preserves multiline cue timing", () => {
   assert.match(formatSrt(cues), /00:00:00,500 --> 00:00:02,250\nFirst line\nSecond line/);
 });
 
-test("converts display language names to faster-whisper language codes", () => {
+test("defaults transcription to Gemini Flash-Lite and retains explicit local routing", () => {
+  const previousProvider = process.env.REELIO_STT_PROVIDER;
+  const previousModel = process.env.GEMINI_STT_MODEL;
+  try {
+    delete process.env.REELIO_STT_PROVIDER;
+    delete process.env.GEMINI_STT_MODEL;
+    assert.equal(DEFAULT_GEMINI_STT_MODEL, "gemini-3.5-flash-lite");
+    assert.equal(sttConfig().provider, "gemini");
+    assert.equal(sttConfig().geminiModel, "gemini-3.5-flash-lite");
+    process.env.REELIO_STT_PROVIDER = "local";
+    assert.equal(sttConfig().provider, "faster-whisper");
+  } finally {
+    restoreEnv("REELIO_STT_PROVIDER", previousProvider);
+    restoreEnv("GEMINI_STT_MODEL", previousModel);
+  }
+});
+
+test("validates Gemini transcript cues and derives reusable transcript text", () => {
+  assert.deepEqual(normalizeGeminiTranscript({
+    language: "EN",
+    cues: [
+      { start: 2.5, end: 4, text: "  Second   cue " },
+      { start: 0, end: 2.25, text: "First cue" },
+    ],
+  }, null, { provider: "gemini", model: DEFAULT_GEMINI_STT_MODEL }), {
+    cues: [
+      { start: 0, end: 2.25, text: "First cue" },
+      { start: 2.5, end: 4, text: "Second cue" },
+    ],
+    text: "First cue Second cue",
+    language: "en",
+    languageProbability: null,
+    fallbackWithoutVad: false,
+    provider: "gemini",
+    model: "gemini-3.5-flash-lite",
+  });
+  assert.throws(() => normalizeGeminiTranscript({ language: "en", cues: [{ start: 2, end: 1, text: "bad" }] }), /invalid transcript cue/);
+  assert.throws(() => normalizeGeminiTranscript({ language: "en", cues: [] }), /No recognizable speech/);
+});
+
+test("converts display language names to transcription language codes", () => {
   assert.equal(sttLanguageCode("auto"), null);
   assert.equal(sttLanguageCode("English"), "en");
   assert.equal(sttLanguageCode("Burmese"), "my");
@@ -843,6 +1413,31 @@ test("honors short smoke-test durations and normal reel ranges", () => {
   assert.deepEqual(durationBounds("2 min"), { min: 120, max: 120 });
 });
 
+test("fits localized narration to the source speaking time with real FFmpeg", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "reelio-language-timing-"));
+  const input = path.join(directory, "translated.m4a");
+  try {
+    const generated = spawnSync(ffmpegPath, [
+      "-y", "-f", "lavfi", "-i", "sine=frequency=520:sample_rate=48000",
+      "-t", "3", "-c:a", "aac", input,
+    ], { encoding: "utf8" });
+    assert.equal(generated.status, 0, generated.stderr);
+    const plan = narrationFitPlan(3, 2.4, { exactDuration: true, desiredDuration: 2 });
+    assert.equal(plan.speed, 1.5);
+    const fitted = await fitNarration({
+      path: input,
+      duration: 3,
+      cues: [{ start: 0, end: 3 }],
+      providerLabel: "test voice",
+    }, 2.4, directory, { exactDuration: true, desiredDuration: 2 });
+    assert.ok(Math.abs(fitted.duration - 2) < 0.08, `expected ~2s, received ${fitted.duration}s`);
+    assert.ok(Math.abs(fitted.cues[0].end - fitted.duration) < 0.01);
+    assert.equal(fitted.speed, 1.5);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("offers ten distinct, validated script structures", () => {
   assert.equal(DEFAULT_SCRIPT_STYLE, "clear-explainer");
   assert.deepEqual(SCRIPT_STYLES.map((style) => style.id), [
@@ -882,6 +1477,7 @@ test("validates generation requests before queuing work", () => {
   assert.throws(() => normalizeVideoRequest({ prompt: "A valid prompt", duration: "60 sec", platforms: [], scriptStyle: "sensational-clickbait" }), /Unsupported script style/);
   assert.equal(normalizeVideoRequest({ prompt: "A valid prompt", duration: "60 sec", platforms: [], narratorId: "nova" }).narratorId, "nova");
   assert.throws(() => normalizeVideoRequest({ prompt: "A valid prompt", duration: "60 sec", platforms: [], narratorId: "celebrity-clone" }), /Unsupported narrator/);
+  assert.equal(normalizeVideoRequest({ prompt: "A valid prompt", duration: "60 sec", platforms: [], sourceJobId: "source-video-job-123" }).sourceJobId, "source-video-job-123");
   const reviewed = normalizeVideoRequest({ prompt: "A valid prompt", duration: "60 sec", platforms: [], approvedScript: "This reviewed script is intentionally long enough for the validation contract." });
   assert.match(reviewed.approvedScript, /reviewed script/);
   const themed = normalizeVideoRequest({
@@ -1027,7 +1623,7 @@ test("validates generation requests before queuing work", () => {
   }), /contiguous/);
 });
 
-test("uses the Guided Create approved script without generating a replacement", async () => {
+test("uses the Prompt to Video approved script without generating a replacement", async () => {
   const approvedScript = `${Array.from({ length: 140 }, (_, index) => `reviewed${index + 1}`).join(" ")}.`;
   const request = normalizeVideoRequest({
     prompt: "Explain a reviewed memory technique",

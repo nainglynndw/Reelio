@@ -6,12 +6,12 @@ import {
   Check,
   ChevronRight,
   CircleHelp,
+  Clapperboard,
   FolderOpen,
   Library,
-  ListChecks,
+  LogIn,
+  LogOut,
   Menu,
-  MoreHorizontal,
-  Plus,
   Search,
   Settings,
   WandSparkles,
@@ -21,15 +21,19 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { AutomationsView } from "./components/AutomationsView";
+import { AuthView, type AuthUser } from "./components/AuthView";
 import { BrandKitView } from "./components/BrandKitView";
+import { CreateVideoModesView } from "./components/CreateVideoModesView";
 import { CreateView } from "./components/CreateView";
-import { GuidedCreateView } from "./components/GuidedCreateView";
 import { LibraryView } from "./components/LibraryView";
+import { LongVideoToShortsView } from "./components/LongVideoToShortsView";
+import { MessageConversationView } from "./components/MessageConversationView";
+import { PromptToVideoView } from "./components/PromptToVideoView";
 import { SettingsView } from "./components/SettingsView";
 import { ToolsView } from "./components/ToolsView";
 import { VideoDetailView } from "./components/VideoDetailView";
 import { defaultTtsEngine } from "./lib/languages";
-import { SERVICE_URL } from "./lib/service";
+import { serviceFetch, SERVICE_URL } from "./lib/service";
 import type { BrandKit, LocalJob, NarratorId, ScriptStyle, TtsEngine, View, VisualSelection, VisualTheme } from "./lib/types";
 
 export default function Home() {
@@ -61,18 +65,48 @@ export default function Home() {
   const [completedJob, setCompletedJob] = useState<LocalJob | null>(null);
   const [selectedJob, setSelectedJob] = useState<LocalJob | null>(null);
   const [serviceReady, setServiceReady] = useState(false);
+  const [authReady, setAuthReady] = useState(false);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authSetupRequired, setAuthSetupRequired] = useState(false);
+  const [authPromptOpen, setAuthPromptOpen] = useState(false);
   const [brandKit, setBrandKit] = useState<BrandKit | null>(null);
   const [toast, setToast] = useState("");
 
   useEffect(() => {
+    serviceFetch(`${SERVICE_URL}/auth/session`)
+      .then(async (response) => {
+        const value = await response.json() as { authenticated?: boolean; setupRequired?: boolean; user?: AuthUser | null };
+        setServiceReady(response.ok);
+        setAuthSetupRequired(Boolean(value.setupRequired));
+        setAuthUser(value.authenticated ? value.user ?? null : null);
+      })
+      .catch(() => {
+        setServiceReady(false);
+        setAuthUser(null);
+      })
+      .finally(() => setAuthReady(true));
+  }, []);
+
+  useEffect(() => {
+    const requireAuth = () => {
+      setAuthUser(null);
+      setAuthReady(true);
+      setAuthPromptOpen(true);
+    };
+    window.addEventListener("reelio:auth-required", requireAuth);
+    return () => window.removeEventListener("reelio:auth-required", requireAuth);
+  }, []);
+
+  useEffect(() => {
+    if (!authUser) return;
     let restoringActiveJob = false;
-    fetch(`${SERVICE_URL}/health`).then((response) => setServiceReady(response.ok)).catch(() => setServiceReady(false));
-    fetch(`${SERVICE_URL}/brand-kit`).then((response) => response.json()).then((value: { brandKit?: BrandKit }) => {
+    serviceFetch(`${SERVICE_URL}/health`).then((response) => setServiceReady(response.ok)).catch(() => setServiceReady(false));
+    serviceFetch(`${SERVICE_URL}/brand-kit`).then((response) => response.json()).then((value: { brandKit?: BrandKit }) => {
       if (!value.brandKit) return;
       setBrandKit(value.brandKit);
       if (!restoringActiveJob) setQuickNarratorId(value.brandKit.defaultNarratorId);
     }).catch(() => {});
-    fetch(`${SERVICE_URL}/jobs`).then((response) => response.json()).then((value: { jobs?: LocalJob[] }) => {
+    serviceFetch(`${SERVICE_URL}/jobs`).then((response) => response.json()).then((value: { jobs?: LocalJob[] }) => {
       const jobs = value.jobs ?? [];
       const active = jobs.find((job) => job.state === "running" || job.state === "queued");
       if (active) {
@@ -91,7 +125,7 @@ export default function Home() {
         setStep(stageStep(active.stage));
       }
     }).catch(() => {});
-  }, []);
+  }, [authUser]);
 
   useEffect(() => {
     if (!activeJobId) return;
@@ -101,7 +135,7 @@ export default function Home() {
       if (polling || cancelled) return;
       polling = true;
       try {
-        const response = await fetch(`${SERVICE_URL}/jobs/${activeJobId}`);
+        const response = await serviceFetch(`${SERVICE_URL}/jobs/${activeJobId}`);
         if (!response.ok) throw new Error("Local renderer unavailable");
         const { job } = await response.json() as { job: LocalJob };
         if (cancelled) return;
@@ -148,10 +182,11 @@ export default function Home() {
   }, [toast]);
 
   async function suggestIdea() {
+    if (!requireAuthentication()) return;
     setSuggesting(true);
     setIdeaMode(null);
     try {
-      const response = await fetch(`${SERVICE_URL}/idea`, {
+      const response = await serviceFetch(`${SERVICE_URL}/idea`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ category, duration, language, focus: ideaFocus.trim() }),
@@ -173,10 +208,11 @@ export default function Home() {
   }
 
   async function getLatestNews() {
+    if (!requireAuthentication()) return;
     setNewsLoading(true);
     setIdeaMode(null);
     try {
-      const response = await fetch(`${SERVICE_URL}/news`, {
+      const response = await serviceFetch(`${SERVICE_URL}/news`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ category, duration, language, focus: ideaFocus.trim() }),
@@ -194,6 +230,7 @@ export default function Home() {
   }
 
   async function startGeneration(approvedScript?: string, visualThemes?: VisualTheme[], visualSelections?: VisualSelection[], scriptStyle?: ScriptStyle, narratorId?: NarratorId) {
+    if (!requireAuthentication()) return;
     if (generating || activeJobId) {
       setToast("A video is already generating. Wait for it to finish.");
       return;
@@ -208,7 +245,7 @@ export default function Home() {
     setCompletedJob(null);
     setGenerating(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/jobs`, {
+      const response = await serviceFetch(`${SERVICE_URL}/jobs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -242,7 +279,7 @@ export default function Home() {
     if (!activeJobId || stoppingGeneration) return;
     setStoppingGeneration(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/jobs/${activeJobId}/stop`, { method: "POST" });
+      const response = await serviceFetch(`${SERVICE_URL}/jobs/${activeJobId}/stop`, { method: "POST" });
       const result = await response.json() as { error?: string; job?: LocalJob };
       if (!response.ok || !result.job) throw new Error(result.error ?? "Generation could not be stopped");
       setGenerating(false);
@@ -267,9 +304,22 @@ export default function Home() {
     setTtsEngine(defaultTtsEngine(value));
   }
 
+  function requireAuthentication() {
+    if (authUser) return true;
+    setAuthPromptOpen(true);
+    return false;
+  }
+
   function openJob(job: LocalJob) {
     setSelectedJob(job);
     setView("detail");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function navigateTo(nextView: View) {
+    setSelectedJob(null);
+    setView(nextView);
+    setMobileNav(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -284,7 +334,7 @@ export default function Home() {
     openJob(job);
   }
 
-  function beginNewVideo(target: "create" | "guided-create" = "create") {
+  function beginNewVideo(target: "create" | "create-video" | "prompt-video" = "create-video") {
     if (generating || activeJobId) {
       setView("create");
       setMobileNav(false);
@@ -297,7 +347,7 @@ export default function Home() {
     setCategory("Curious science");
     setDuration("90 sec");
     setLanguage("English");
-    setTtsEngine("kokoro");
+    setTtsEngine(defaultTtsEngine("English"));
     setQuickNarratorId(brandKit?.defaultNarratorId ?? "maya");
     setSubtitleLanguage("English");
     setSelectedPlatforms(["youtube", "tiktok", "facebook", "instagram"]);
@@ -314,6 +364,20 @@ export default function Home() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
+  async function signOut() {
+    await serviceFetch(`${SERVICE_URL}/auth/logout`, { method: "POST" }).catch(() => {});
+    setAuthUser(null);
+    setAuthPromptOpen(false);
+    setCompletedJob(null);
+    setSelectedJob(null);
+    setActiveJobId(null);
+    setGenerating(false);
+  }
+
+  if (!authReady) {
+    return <main className="auth-loading"><span className="brand-mark" /><strong>Opening Reelio…</strong></main>;
+  }
+
   return (
     <main className="app-shell">
       <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
@@ -326,36 +390,34 @@ export default function Home() {
           <button className="mobile-close" onClick={() => setMobileNav(false)} aria-label="Close menu"><X size={19} /></button>
         </div>
 
-        <button className="new-video-button" onClick={() => beginNewVideo()}>
-          <Plus size={18} /> New video
-        </button>
-
         <nav aria-label="Main navigation">
-          <NavButton icon={<WandSparkles size={18} />} label="Quick Create" active={view === "create"} onClick={() => { setView("create"); setMobileNav(false); }} />
-          <NavButton icon={<ListChecks size={18} />} label="Guided Create" active={view === "guided-create"} badge="New" onClick={() => { setView("guided-create"); setMobileNav(false); }} />
-          <NavButton icon={<Wrench size={18} />} label="Tools" active={view === "tools"} badge="New" onClick={() => { setView("tools"); setMobileNav(false); }} />
-          <NavButton icon={<Library size={18} />} label="Video library" active={view === "library" || view === "detail"} onClick={() => { setView("library"); setMobileNav(false); }} />
-          <NavButton icon={<CalendarClock size={18} />} label="Automations" active={view === "automations"} badge="Live" onClick={() => { setView("automations"); setMobileNav(false); }} />
+          <NavButton icon={<WandSparkles size={18} />} label="Quick Create" active={view === "create"} onClick={() => navigateTo("create")} />
+          <NavButton icon={<Clapperboard size={18} />} label="Create Video" active={view === "create-video" || view === "prompt-video" || view === "long-video-shorts" || view === "message-conversation"} onClick={() => navigateTo("create-video")} />
+          <NavButton icon={<Wrench size={18} />} label="Tools" active={view === "tools"} badge="New" onClick={() => navigateTo("tools")} />
+          <NavButton icon={<Library size={18} />} label="Video library" active={view === "library" || view === "detail"} onClick={() => navigateTo("library")} />
+          <NavButton icon={<CalendarClock size={18} />} label="Automations" active={view === "automations"} badge="Live" onClick={() => navigateTo("automations")} />
         </nav>
 
         <div className="sidebar-section-label">Workspace</div>
         <nav aria-label="Workspace navigation">
-          <NavButton icon={<FolderOpen size={18} />} label="Brand Kit" active={view === "brand-kit"} onClick={() => { setView("brand-kit"); setMobileNav(false); }} />
+          <NavButton icon={<FolderOpen size={18} />} label="Brand Kit" active={view === "brand-kit"} onClick={() => navigateTo("brand-kit")} />
           <NavButton icon={<Archive size={18} />} label="Archive" onClick={() => setToast("Archive is empty")} />
         </nav>
 
         <div className="sidebar-bottom">
-          <NavButton icon={<Settings size={18} />} label="Settings" active={view === "settings"} onClick={() => { setView("settings"); setMobileNav(false); }} />
+          <NavButton icon={<Settings size={18} />} label="Settings" active={view === "settings"} onClick={() => navigateTo("settings")} />
           <NavButton icon={<CircleHelp size={18} />} label="Help center" onClick={() => setToast("Help center is coming soon")} />
           <div className="usage-card">
-            <div><span>Monthly render time</span><strong>46 / 120 min</strong></div>
-            <div className="usage-track"><span /></div>
-            <small>Resets in 12 days</small>
+            <div><span>{authUser ? "Monthly renders" : "Explore Reelio"}</span><strong>{authUser ? `${authUser.subscription.rendersUsed} / ${authUser.subscription.includedRenders}` : "Free"}</strong></div>
+            <div className="usage-track"><span style={{ width: authUser ? `${Math.min(100, authUser.subscription.rendersUsed / Math.max(1, authUser.subscription.includedRenders) * 100)}%` : "0%" }} /></div>
+            <small>{authUser ? `${planLabel(authUser.subscription.planCode)} · ${authUser.subscription.status}` : "Sign in only when you start work"}</small>
           </div>
           <div className="profile-row">
-            <div className="avatar">NL</div>
-            <div><strong>Creator workspace</strong><span>Local on this Mac</span></div>
-            <MoreHorizontal size={18} />
+            <div className="avatar">{authUser ? userInitials(authUser) : "GU"}</div>
+            <div><strong>{authUser?.displayName ?? "Guest explorer"}</strong><span>{authUser ? `${planLabel(authUser.subscription.planCode)} · ${authUser.email}` : "Browse before signing in"}</span></div>
+            {authUser
+              ? <button className="profile-logout" onClick={() => void signOut()} aria-label="Sign out" title="Sign out"><LogOut size={16} /></button>
+              : <button className="profile-logout" onClick={() => setAuthPromptOpen(true)} aria-label="Sign in" title="Sign in"><LogIn size={16} /></button>}
           </div>
         </div>
       </aside>
@@ -373,6 +435,7 @@ export default function Home() {
           </div>
         </header>
 
+        {view === "create-video" && <CreateVideoModesView onOpenPromptVideo={() => beginNewVideo("prompt-video")} onOpenLongVideo={() => setView("long-video-shorts")} onOpenMessageConversation={() => setView("message-conversation")} />}
         {view === "create" && (
           <CreateView
             prompt={prompt}
@@ -409,9 +472,9 @@ export default function Home() {
             stoppingGeneration={stoppingGeneration}
           />
         )}
-        {view === "guided-create" && (
-          <GuidedCreateView
-            key={`guided-${brandKit?.defaultNarratorId ?? "maya"}`}
+        {view === "prompt-video" && (
+          <PromptToVideoView
+            key={`prompt-video-${brandKit?.defaultNarratorId ?? "maya"}`}
             prompt={prompt}
             setPrompt={setPrompt}
             category={category}
@@ -440,19 +503,30 @@ export default function Home() {
             startGeneration={startGeneration}
             stopGeneration={stopGeneration}
             openJob={openJob}
-            onCreateAnother={() => beginNewVideo("guided-create")}
+            onCreateAnother={() => beginNewVideo("prompt-video")}
+            onBackToModes={() => setView("create-video")}
             onOpenSettings={() => setView("settings")}
             setToast={setToast}
             defaultNarratorId={brandKit?.defaultNarratorId ?? "maya"}
           />
         )}
-        {view === "library" && <LibraryView onNewVideo={() => beginNewVideo()} onOpenJob={openJob} onOpenSettings={() => { setView("settings"); window.setTimeout(() => document.getElementById("publishing-accounts")?.scrollIntoView({ behavior: "smooth" }), 50); }} setToast={setToast} />}
+        {view === "long-video-shorts" && <LongVideoToShortsView authenticated={Boolean(authUser)} onRequireAuthentication={requireAuthentication} onBackToModes={() => setView("create-video")} onOpenJob={openJob} onOpenSettings={() => setView("settings")} setToast={setToast} />}
+        {view === "message-conversation" && <MessageConversationView authenticated={Boolean(authUser)} onRequireAuthentication={requireAuthentication} onBackToModes={() => setView("create-video")} onOpenJob={openJob} onOpenSettings={() => setView("settings")} setToast={setToast} />}
+        {view === "library" && <LibraryView authenticated={Boolean(authUser)} onRequireAuthentication={requireAuthentication} onCreateVideo={() => beginNewVideo("create-video")} onOpenJob={openJob} onOpenSettings={() => { setView("settings"); window.setTimeout(() => document.getElementById("publishing-accounts")?.scrollIntoView({ behavior: "smooth" }), 50); }} setToast={setToast} />}
         {view === "detail" && selectedJob && <VideoDetailView key={selectedJob.id} job={selectedJob} generationLocked={Boolean(activeJobId) || generating} onBack={() => setView("library")} onOpenSettings={() => { setView("settings"); window.setTimeout(() => document.getElementById("publishing-accounts")?.scrollIntoView({ behavior: "smooth" }), 50); }} onJobCreated={openCreatedJob} setToast={setToast} />}
-        {view === "automations" && <AutomationsView setToast={setToast} onOpenJob={openJob} onOpenSettings={() => { setView("settings"); window.setTimeout(() => document.getElementById("publishing-accounts")?.scrollIntoView({ behavior: "smooth" }), 50); }} />}
-        {view === "tools" && <ToolsView setToast={setToast} onOpenSettings={() => setView("settings")} />}
-        {view === "brand-kit" && <BrandKitView setToast={setToast} onBrandKitChange={setBrandKit} />}
-        {view === "settings" && <SettingsView setToast={setToast} />}
+        {view === "automations" && <AutomationsView authenticated={Boolean(authUser)} onRequireAuthentication={requireAuthentication} setToast={setToast} onOpenJob={openJob} onOpenSettings={() => { setView("settings"); window.setTimeout(() => document.getElementById("publishing-accounts")?.scrollIntoView({ behavior: "smooth" }), 50); }} />}
+        {view === "tools" && <ToolsView authenticated={Boolean(authUser)} onRequireAuthentication={requireAuthentication} setToast={setToast} onOpenSettings={() => setView("settings")} />}
+        {view === "brand-kit" && <BrandKitView authenticated={Boolean(authUser)} onRequireAuthentication={requireAuthentication} setToast={setToast} onBrandKitChange={setBrandKit} />}
+        {view === "settings" && <SettingsView authenticated={Boolean(authUser)} onRequireAuthentication={requireAuthentication} setToast={setToast} />}
       </section>
+
+      {authPromptOpen && <AuthView setupRequired={authSetupRequired} serviceOnline={serviceReady} onClose={() => setAuthPromptOpen(false)} onAuthenticated={(user) => {
+        setAuthUser(user);
+        setAuthSetupRequired(false);
+        setServiceReady(true);
+        setAuthPromptOpen(false);
+        setToast("Signed in. You can continue where you left off.");
+      }} />}
 
       {toast && <div className="toast"><Check size={16} /> {toast}</div>}
     </main>
@@ -461,7 +535,7 @@ export default function Home() {
 
 function NavButton({ icon, label, active, count, badge, onClick }: { icon: React.ReactNode; label: string; active?: boolean; count?: string; badge?: string; onClick: () => void }) {
   return (
-    <button className={`nav-button ${active ? "active" : ""}`} onClick={onClick}>
+    <button type="button" className={`nav-button ${active ? "active" : ""}`} onClick={onClick}>
       {icon}<span>{label}</span>{count && <small>{count}</small>}{badge && <em>{badge}</em>}
     </button>
   );
@@ -469,7 +543,10 @@ function NavButton({ icon, label, active, count, badge, onClick }: { icon: React
 
 function viewLabel(view: View) {
   if (view === "create") return "Quick Create";
-  if (view === "guided-create") return "Guided Create";
+  if (view === "create-video") return "Create Video";
+  if (view === "prompt-video") return "Prompt to Video";
+  if (view === "long-video-shorts") return "Long Video to Shorts";
+  if (view === "message-conversation") return "Message Conversation";
   if (view === "tools") return "Tools";
   if (view === "library") return "Video library";
   if (view === "detail") return "Video detail";
@@ -483,4 +560,14 @@ function stageStep(stage: string) {
   if (stage === "voice" || stage === "music") return 1;
   if (stage === "stock-search") return 2;
   return 3;
+}
+
+function userInitials(user: AuthUser) {
+  const parts = user.displayName.trim().split(/\s+/).filter(Boolean);
+  const initials = parts.length > 1 ? `${parts[0][0]}${parts.at(-1)?.[0] ?? ""}` : parts[0]?.slice(0, 2);
+  return (initials || user.email.slice(0, 2)).toUpperCase();
+}
+
+function planLabel(plan: AuthUser["subscription"]["planCode"]) {
+  return `${plan.charAt(0).toUpperCase()}${plan.slice(1)} plan`;
 }

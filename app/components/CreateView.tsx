@@ -151,7 +151,7 @@ export function CreateView(props: {
           <div className="form-section">
             <div className="section-title"><span>Creative direction</span><small>Used by the AI idea generator</small></div>
             <div className="field-grid">
-              <SelectField icon={<Sparkles size={16} />} label="Topic lane" value={props.category} onChange={props.setCategory} options={["Curious science", "Psychology", "Business", "History", "Technology", "Wellness"]} />
+              <SelectField icon={<Sparkles size={16} />} label="Topic lane" value={props.category} onChange={props.setCategory} options={["Curious science", "Psychology", "Business", "History", "Technology", "Wellness", "News", "Sports", "Documentary"]} />
               <SelectField icon={<Clock3 size={16} />} label="Target duration" value={props.duration} onChange={props.setDuration} options={["60 sec", "75 sec", "90 sec", "2 min", "Up to 3 min"]} />
               <SelectField icon={<Mic2 size={16} />} label="Speech / transcript language" value={props.language} onChange={props.setLanguage} options={speechLanguages} />
               <SelectField icon={<Zap size={16} />} label="Voice engine" value={props.ttsEngine} onChange={props.setTtsEngine} options={ttsEngineOptions(props.language)} />

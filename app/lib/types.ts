@@ -1,4 +1,4 @@
-export type View = "create" | "guided-create" | "tools" | "library" | "detail" | "automations" | "brand-kit" | "settings";
+export type View = "create" | "create-video" | "prompt-video" | "long-video-shorts" | "message-conversation" | "tools" | "library" | "detail" | "automations" | "brand-kit" | "settings";
 export type TtsEngine = "kokoro" | "gemini" | "voxcpm2";
 export type ScriptStyle = "clear-explainer" | "story-led" | "problem-solution" | "myth-fact" | "list-format" | "question-led" | "case-study" | "compare-contrast" | "timeline" | "practical-guide";
 export type NarratorId = "maya" | "theo" | "nova" | "ellis";
@@ -17,6 +17,114 @@ export type VisualSelection = {
   query?: string;
   uploadId?: string;
   fileName?: string;
+};
+export type ConversationEventType = "text" | "image" | "video" | "audio" | "typing" | "notification" | "battery" | "call" | "chat-switch" | "system" | "date";
+export type ConversationParticipant = {
+  id: string;
+  name: string;
+  initials: string;
+  color: string;
+  isSelf: boolean;
+  narratorId: NarratorId;
+  avatarAssetId?: string | null;
+};
+export type ConversationReaction = { participantId: string; emoji: string };
+export type ConversationCallLine = { id: string; participantId: string; text: string; delayMs: number };
+export type ConversationEvent = {
+  id: string;
+  type: ConversationEventType;
+  participantId?: string | null;
+  text: string;
+  assetId?: string | null;
+  fileName?: string;
+  delayBeforeMs: number;
+  holdMs: number;
+  typingMs: number;
+  typingStyle: "clean" | "natural" | "hesitant" | "fast";
+  chatId: string;
+  chatTitle: string;
+  displayTime: string;
+  receipt: "none" | "sent" | "delivered" | "read";
+  replyToEventId?: string | null;
+  reactions: ConversationReaction[];
+  edited: boolean;
+  deleted: boolean;
+  playAudio: boolean;
+  callState?: "incoming" | "outgoing" | "missed" | "declined" | "completed" | null;
+  callDialogue: ConversationCallLine[];
+  notificationTitle: string;
+  batteryLevel?: number | null;
+  charging: boolean;
+};
+export type ConversationDraft = {
+  version: 1;
+  id: string;
+  revision: number;
+  title: string;
+  language: string;
+  authenticity: "fictional";
+  clock: { startDate: string; startTime: string; format: "12h" | "24h" };
+  participants: ConversationParticipant[];
+  events: ConversationEvent[];
+  appearance: {
+    theme: "reelio-light" | "reelio-dark" | "minimal" | "brand";
+    layout: "screen" | "device";
+    bubbleStyle: "soft" | "square" | "compact";
+    background: { type: "solid" | "gradient" | "image" | "motion"; color: string; accentColor: string; assetId?: string | null };
+    showSafeZone: boolean;
+    coverTimeMs: number;
+  };
+  audio: {
+    mode: "silent" | "sfx" | "narrator" | "characters";
+    ttsEngine: TtsEngine;
+    narratorId: NarratorId;
+    sfxVolume: number;
+    musicEnabled: boolean;
+    musicSource: "none" | "brand" | "upload";
+    musicAssetId?: string | null;
+    musicVolume: number;
+  };
+  platforms: string[];
+  applyBrandKit: boolean;
+  approved: boolean;
+  generation?: {
+    mode: "manual" | "ai";
+    premise?: string;
+    provider?: string;
+    model?: string;
+    genre?: string;
+    qualityStages?: string[];
+    fallback?: { provider?: string; model?: string; reason?: string } | null;
+    generatedAt?: string | null;
+  } | null;
+  validation?: { durationMs: number; eventCount: number; participantCount: number };
+  createdAt: string;
+  updatedAt: string;
+};
+export type ConversationAsset = {
+  id: string;
+  draftId: string;
+  name: string;
+  bytes: number;
+  mediaType: string;
+  kind: "avatar" | "image" | "background" | "video" | "motion" | "audio";
+  durationSeconds?: number;
+  width?: number;
+  height?: number;
+  hasAudio?: boolean;
+  url: string;
+  createdAt: string;
+};
+export type ConversationStoryPitch = {
+  id: string;
+  title: string;
+  premise: string;
+  relationship: string;
+  genre: string;
+  situation: string;
+  ending: string;
+  tone: string;
+  cast: Array<{ name: string; role: string; isSelf: boolean }>;
 };
 export type PlatformPostCopy = { title: string; caption: string; description: string; tags: string[] };
 export type BrandAssetKind = "logo" | "intro" | "outro" | "music";
@@ -113,7 +221,7 @@ export type LocalJob = {
   progress: number;
   message: string;
   error?: string;
-  request: { prompt: string; category: string; duration: string; language: string; ttsEngine?: TtsEngine; subtitleLanguage: string; platforms: string[]; scriptStyle?: ScriptStyle; narratorId?: NarratorId; approvedScript?: string; visualThemes?: VisualTheme[]; visualSelections?: VisualSelection[]; brandKit?: BrandKit | null };
+  request: { prompt: string; category: string; duration: string; language: string; ttsEngine?: TtsEngine; subtitleLanguage: string; platforms: string[]; scriptStyle?: ScriptStyle; narratorId?: NarratorId; approvedScript?: string; visualThemes?: VisualTheme[]; visualSelections?: VisualSelection[]; brandKit?: BrandKit | null; sourceJobId?: string; creationMode?: "message-conversation" | string; draftId?: string; draftRevision?: number; conversation?: ConversationDraft & { assets?: ConversationAsset[] } };
   assets?: Record<string, { name: string; url: string; downloadUrl: string }> | null;
   metadata?: {
     title?: string;
@@ -131,7 +239,45 @@ export type LocalJob = {
     scriptStyle?: string;
     visualThemes?: VisualTheme[];
     visualPlanningMode?: string;
+    creationMode?: "long-video-shorts" | string;
+    conversationDraftId?: string;
+    conversationDraftRevision?: number;
+    conversationTheme?: string;
+    conversationLayout?: string;
+    conversationAudioMode?: string;
+    conversationParticipants?: string[];
+    authenticity?: "fictional" | string;
+    sourceToolJobId?: string;
+    sourceAssetKey?: string;
+    sourceUrl?: string | null;
+    sourceLabel?: string;
+    sourceTitle?: string | null;
+    sourceLanguage?: string;
+    legacyPackage?: boolean;
+    descriptionVersion?: number;
+    provisional?: boolean;
+    languageVersionOf?: string | null;
+    languageVersionTiming?: {
+      sourceVideoDurationSeconds?: number;
+      sourceNarrationDurationSeconds?: number;
+      translatedNarrationDurationSeconds?: number;
+      fittedNarrationDurationSeconds?: number;
+      speechSpeed?: number;
+      visualPolicy?: "source-edit" | string;
+    } | null;
+    localizedLanguage?: string;
+    titleCardSeconds?: number;
+    thumbnailTitle?: string;
     platformCopy?: Record<string, PlatformPostCopy>;
+    publishingCopySource?: {
+      mode?: string;
+      provider?: string | null;
+      model?: string | null;
+      error?: string | null;
+      bilingual?: boolean;
+      sourceLanguage?: string;
+      localizedLanguage?: string;
+    };
     retentionPreflight?: {
       score?: number;
       hookWithinSeconds?: number;
@@ -150,7 +296,15 @@ export type LocalJob = {
 
 export type ProviderHealth = { gemini: boolean; geminiTts: boolean; kokoro: boolean; voxcpm2: boolean; openrouter: boolean; pexels: boolean; pixabay: boolean; youtube: boolean; tiktok: boolean; facebook: boolean; instagram: boolean };
 export type TtsHealth = { enabled?: boolean; ready?: boolean; modelLoaded?: boolean; loading?: boolean; provider?: string; model?: string; device?: string; error?: string | null };
-export type TextHealth = { ready?: boolean; provider?: string; preferred?: string; model?: string };
+export type TextHealth = {
+  ready?: boolean;
+  provider?: string;
+  preferred?: string;
+  model?: string;
+  creativeModel?: string | null;
+  utilityModel?: string | null;
+};
+export type ConversationRendererHealth = { enabled?: boolean; ready?: boolean; browser?: string | null; message?: string };
 export type YouTubeStatus = { connected: boolean; configured: boolean; hasAuthorization?: boolean; channelId?: string; channelTitle?: string; message?: string; redirectUri?: string };
 export type TikTokStatus = { connected: boolean; configured: boolean; hasAuthorization?: boolean; accountId?: string; displayName?: string; avatarUrl?: string; uploadReady?: boolean; message?: string; redirectUri?: string };
 export type FacebookStatus = { connected: boolean; configured: boolean; hasAuthorization?: boolean; pageId?: string; pageName?: string; graphVersion?: string; needsPageSelection?: boolean; pages?: Array<{ id: string; name: string }>; redirectUri?: string; message?: string };
@@ -175,8 +329,8 @@ export type ToolJob = {
   progress: number;
   message: string;
   error?: string;
-  request: { toolId: string; inputs: Record<string, { uploadId?: string; toolJobId?: string; assetKey?: string }>; options: Record<string, string | number | boolean> };
+  request: { toolId: string; inputs: Record<string, { uploadId?: string; toolJobId?: string; assetKey?: string }>; options: Record<string, unknown> };
   assets?: Record<string, ToolAsset> | null;
-  metadata?: Record<string, string | number | boolean>;
+  metadata?: Record<string, unknown>;
   createdAt: string;
 };

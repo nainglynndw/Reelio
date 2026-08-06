@@ -27,15 +27,39 @@ async function render() {
   );
 }
 
-test("renders the Reelio creator shell", async () => {
+test("renders the authenticated Reelio bootstrap shell", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /<title>Reelio — AI Knowledge Video Studio<\/title>/i);
-  assert.match(html, /Suggest an idea/);
-  assert.match(html, /Latest news/);
-  assert.match(html, /Turn an idea into a reel people finish/);
+  assert.match(html, /Opening Reelio/);
+  const source = await readAppSource();
+  assert.match(source, /Create your Reelio account/);
+  assert.match(source, /Sign in to Reelio/);
+  assert.match(source, /Guest explorer/);
+  assert.match(source, /Sign in only when you start work/);
+  assert.match(source, /Continue exploring without signing in/);
+  assert.match(source, /Turn an idea into a reel people finish/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
+});
+
+test("shows every product surface to guests and gates protected actions", async () => {
+  const [page, library, tools, automations, brandKit, settings, longVideo] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/LibraryView.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/ToolsView.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/AutomationsView.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/BrandKitView.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/SettingsView.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/LongVideoToShortsView.tsx", import.meta.url), "utf8"),
+  ]);
+  for (const component of ["LibraryView", "ToolsView", "AutomationsView", "BrandKitView", "SettingsView"]) {
+    assert.match(page, new RegExp(`view === \\"[^\\"]+\\" && <${component}`));
+  }
+  assert.doesNotMatch(page, /GuestAccessView/);
+  for (const component of [library, tools, automations, brandKit, settings, longVideo]) {
+    assert.match(component, /if \(!authenticated\) return void onRequireAuthentication\(\)/);
+  }
 });
 
 test("ships the Reelio app icon set and installable manifest", async () => {
@@ -64,7 +88,11 @@ test("keeps the active AI provider contracts in the project", async () => {
   ]);
   assert.match(envExample, /REELIO_TEXT_PROVIDER=google/);
   assert.match(envExample, /GEMINI_API_KEY=/);
-  assert.match(envExample, /GEMINI_TEXT_MODEL=gemini-3.5-flash/);
+  assert.match(envExample, /GEMINI_TEXT_MODEL=gemini-3.6-flash/);
+  assert.match(envExample, /GEMINI_CREATIVE_MODEL=gemini-3.6-flash/);
+  assert.match(envExample, /GEMINI_UTILITY_MODEL=gemini-3.5-flash-lite/);
+  assert.match(envExample, /REELIO_STT_PROVIDER=gemini/);
+  assert.match(envExample, /GEMINI_STT_MODEL=gemini-3.5-flash-lite/);
   assert.match(envExample, /GEMINI_TTS_MODEL=gemini-3.1-flash-tts-preview/);
   assert.match(envExample, /REELIO_BRAND_VOICE_OVERRIDE=false/);
   assert.match(envExample, /GEMINI_TTS_VOICE=Puck/);
@@ -77,6 +105,8 @@ test("keeps the active AI provider contracts in the project", async () => {
   assert.match(envExample, /PIXABAY_API_KEY=/);
   assert.match(settings, /Pixabay/);
   assert.match(settings, /pixabayApiKey/);
+  assert.match(settings, /geminiCreativeModel:\s*"gemini-3\.6-flash"/);
+  assert.match(settings, /geminiUtilityModel:\s*"gemini-3\.5-flash-lite"/);
   assert.match(settings, /pixabay\.com\/api\/docs/);
   assert.match(envExample, /KOKORO_MODEL_PATH=.reelio\/kokoro\/models\/kokoro-v1.0.onnx/);
   assert.match(envExample, /KOKORO_VOICE=af_heart/);
@@ -119,17 +149,111 @@ test("includes the complete video detail workflow", async () => {
   assert.match(page, /tiktok\.com\/tiktokstudio\/content/);
 });
 
-test("keeps Quick Create and adds a separate functional Guided Create flow", async () => {
-  const [page, guided, service, pipeline] = await Promise.all([
+test("keeps Quick Create and adds reviewed Prompt, Conversation, and Long Video creation modes", async () => {
+  const [page, modes, guided, longVideo, conversation, library, service, pipeline] = await Promise.all([
     readAppSource(),
-    readFile(new URL("../app/components/GuidedCreateView.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/CreateVideoModesView.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/PromptToVideoView.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/LongVideoToShortsView.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/MessageConversationView.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/LibraryView.tsx", import.meta.url), "utf8"),
     readFile(new URL("../local-service/server.mjs", import.meta.url), "utf8"),
     readFile(new URL("../local-service/pipeline.mjs", import.meta.url), "utf8"),
   ]);
   assert.match(page, /label="Quick Create"/);
-  assert.match(page, /label="Guided Create"/);
+  assert.match(page, /label="Create Video"/);
+  assert.doesNotMatch(page, /label="Guided Create"/);
   assert.match(page, /view === "create"/);
-  assert.match(page, /view === "guided-create"/);
+  assert.match(page, /view === "create-video"/);
+  assert.match(page, /view === "prompt-video"/);
+  assert.match(page, /view === "long-video-shorts"/);
+  assert.match(page, /view === "message-conversation"/);
+  assert.doesNotMatch(page, /new-video-button/);
+  for (const mode of ["Prompt to Video", "Message Conversation", "Long Video to Shorts", "Sports Highlights", "Documentary & Case Recap"]) {
+    assert.match(modes, new RegExp(mode.replace(/[&]/g, "\\&")));
+  }
+  assert.match(modes, /Expected result/);
+  assert.match(modes, />FROM</);
+  assert.match(modes, />TO</);
+  assert.match(modes, /GENERATES/);
+  assert.match(modes, /Coming soon/);
+  assert.match(modes, /onOpenPromptVideo/);
+  assert.match(modes, /onOpenLongVideo/);
+  assert.match(modes, /onOpenMessageConversation/);
+  assert.match(modes, /3 modes available/);
+  assert.match(conversation, /Fictional conversation/);
+  assert.match(conversation, /Generate quality-checked conversation/);
+  assert.match(conversation, /participantRoles/);
+  assert.match(conversation, /Typing behavior/);
+  assert.match(conversation, /Low battery/);
+  assert.match(conversation, /Switch chat/);
+  assert.match(conversation, /Call dialogue/);
+  assert.match(conversation, /Help me shape it/);
+  assert.match(conversation, /Surprise me/);
+  assert.match(conversation, /Build editable premise/);
+  assert.match(conversation, /story-starters/);
+  assert.match(conversation, /conversation-drafts/);
+  assert.match(conversation, /Record 9:16 conversation video/);
+  assert.match(conversation, /Duplicate & translate/);
+  assert.match(conversation, /Character voices/);
+  assert.match(conversation, /Sound effects ·/);
+  assert.match(conversation, /Background music/);
+  assert.match(conversation, /Local upload/);
+  assert.match(conversation, /does not impose a maximum render duration/);
+  assert.match(conversation, /Play conversation preview/);
+  assert.match(conversation, /Mute conversation sounds/);
+  assert.match(conversation, /aria-label="Restart conversation preview"/);
+  assert.match(conversation, /className="conversation-color-input"/);
+  assert.match(conversation, /className="conversation-add"/);
+  assert.match(page, /aria-label=\{isMessageConversation \? "Play conversation video"/);
+  assert.match(page, /poster=\{currentJob\.assets\.thumbnail/);
+  assert.match(service, /frame-ancestors \$\{frameAncestors\}/);
+  assert.match(service, /const frameAncestors = \["'self'",/);
+  assert.match(service, /genrePromise/);
+  assert.match(service, /treatment-candidates/);
+  assert.match(service, /treatment-judge/);
+  assert.match(service, /genre-edit/);
+  assert.match(service, /clarity-edit/);
+  assert.match(service, /local-compile/);
+  assert.match(service, /Reelio rejected two weak story-treatment batches/);
+  assert.match(service, /Do not generate playback delays/);
+  assert.match(service, /first three text messages/);
+  assert.match(service, /no context outside this array/);
+  assert.match(service, /roleByParticipantId/);
+  assert.match(service, /at least three recognizable comic turns/);
+  assert.match(longVideo, /I own or am licensed to edit and publish this source/);
+  assert.match(longVideo, /I consent to Gemini cloud processing/);
+  assert.match(longVideo, /Nothing renders until you approve it/);
+  assert.match(longVideo, /not a rights or content-policy workaround/);
+  assert.match(longVideo, /long-video-analyze/);
+  assert.match(longVideo, /long-video-render/);
+  assert.match(longVideo, /Use as mode showcase/);
+  assert.match(longVideo, /Thumbnail/);
+  assert.match(longVideo, /Complete publishing treatment/);
+  assert.match(longVideo, /Reviewed narration script/);
+  assert.match(longVideo, /packageTreatment: true/);
+  assert.match(longVideo, /Review & publish/);
+  assert.match(longVideo, /publishing packages ready/i);
+  assert.match(longVideo, /Upgrade publishing treatment/);
+  assert.match(longVideo, /resumableAnalysis/);
+  assert.doesNotMatch(longVideo, /active \?\? recent\[0\]/);
+  assert.match(library, /library-mode-switcher/);
+  assert.match(library, /All modes/);
+  assert.match(library, /Prompt to Video/);
+  assert.match(library, /Long Video to Shorts/);
+  assert.match(library, /Message Conversation/);
+  assert.match(library, /Quick Create/);
+  assert.match(library, /Automation/);
+  assert.match(library, /selectedMode/);
+  assert.match(library, /library-mode-lists/);
+  assert.match(library, /groupLongVideoItems/);
+  assert.match(library, /library-source-group/);
+  assert.match(library, /library-source-children/);
+  assert.match(library, /aria-expanded/);
+  assert.match(library, /expand to review each publishing package/);
+  assert.match(page, /navigateTo\("create-video"\)/);
+  assert.match(guided, /All video modes/);
+  assert.match(guided, /PROMPT TO VIDEO/);
   assert.match(guided, /Brief/);
   assert.match(guided, /Approve the exact script/);
   assert.match(guided, /Choose production settings/);
@@ -209,6 +333,9 @@ test("keeps Quick Create and adds a separate functional Guided Create flow", asy
   assert.match(service, /url\.pathname === "\/visual-themes"/);
   assert.match(service, /body\.localOnly === true/);
   assert.match(service, /url\.pathname === "\/visual-candidates"/);
+  assert.match(service, /materializeLegacyLongVideoJobs/);
+  assert.match(service, /Legacy short promoted to a reviewable video record/);
+  assert.match(service, /libraryDismissedAssetKeys/);
   assert.match(pipeline, /export async function createScriptDraft/);
   assert.match(pipeline, /export async function createVisualThemePlan/);
   assert.match(pipeline, /export function createLocalVisualThemePlan/);
@@ -217,7 +344,9 @@ test("keeps Quick Create and adds a separate functional Guided Create flow", asy
   assert.match(pipeline, /allocateStoryboardCandidates/);
   assert.match(pipeline, /STOCK_RESULTS_PER_PROVIDER = 48/);
   assert.match(pipeline, /STOCK_SEARCH_CACHE_MS/);
-  assert.match(pipeline, /preserving the selected "\$\{scriptStyle\.label\}" structure/);
+  assert.match(pipeline, /Return only a JSON array containing zero to ten minimal patches/);
+  assert.match(pipeline, /applyScriptPatches/);
+  assert.match(pipeline, /SCRIPT_VOICE_EXAMPLES/);
   assert.match(pipeline, /researchScriptTopic/);
   assert.match(pipeline, /createScriptAnglePlan/);
   assert.match(pipeline, /grounded_evidence/);
@@ -240,7 +369,9 @@ test("includes a modular Tools tab with reusable multi-job outputs", async () =>
   assert.match(page, /Media jobs can run together/);
   assert.match(page, /Run \$\{selected\.name\}/);
   assert.match(page, /aiLabel: "API key"/);
-  assert.match(page, /aiLabel: "Local AI"/);
+  assert.match(page, /aiLabel: "AI transcription"/);
+  assert.match(page, /Gemini cloud transcription · audio sent to Google/);
+  assert.match(page, /remote file is deleted after transcription/);
   assert.match(page, /Subtitle text is sent to the selected cloud provider/);
   assert.match(page, /aiLabel: "No AI"/);
   assert.match(page, /Local link utility · no AI or API key/);

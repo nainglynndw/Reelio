@@ -6,12 +6,18 @@ import ffprobe from "ffprobe-static";
 import { synthesizeGeminiCues } from "../gemini-tts-client.mjs";
 import { registerJobProcess } from "../job-control.mjs";
 import { synthesizeKokoroCues } from "../kokoro-client.mjs";
-import { transcribeMedia } from "../stt-client.mjs";
+import { sttConfig, transcribeMedia } from "../stt-client.mjs";
 import { generateText, textProviderConfig } from "../text-provider.mjs";
 import { synthesizeVoxCpmCues } from "../voxcpm-client.mjs";
 import { DEFAULT_NARRATOR_ID, NARRATORS, narratorProfile } from "../narrators.mjs";
 import { formatSrt, parseSubtitles } from "./subtitles.mjs";
 import { downloadWebCaptions, downloadWebMedia, normalizeWebMediaUrl } from "./web-media.mjs";
+import {
+  analyzeLongVideo,
+  renderLongVideoShorts,
+  validateLongVideoAnalyzeOptions,
+  validateLongVideoRenderOptions,
+} from "./long-video.mjs";
 import { applyBrandVisuals, brandSubtitleForceStyle } from "../pipeline.mjs";
 
 const ffprobePath = ffprobe.path;
@@ -22,6 +28,11 @@ export const TOOL_DEFINITIONS = [
   { id: "extract-audio", label: "Generate audio", description: "Extract a clean audio track from a video.", group: "media", inputs: [{ id: "video", label: "Video", accepts: "video/*" }] },
   { id: "extract-subtitles", label: "Extract subtitle track", description: "Copy an existing embedded subtitle track to SRT without speech recognition.", group: "media", inputs: [{ id: "video", label: "Video with subtitles", accepts: "video/*" }] },
   { id: "extract-web-captions", label: "Extract captions from link", description: "Save existing manual or automatic captions from a supported public link.", group: "media", inputs: [] },
+  { id: "long-video-analyze", label: "Find short highlights", description: "Transcribe a licensed long video and identify coherent moments for review.", group: "model", inputs: [{ id: "media", label: "Long video", accepts: "video/*" }] },
+  { id: "long-video-render", label: "Produce reviewed shorts", description: "Turn approved highlights into narrated, translated, captioned, publish-ready video packages.", group: "model", inputs: [
+    { id: "media", label: "Long video", accepts: "video/*" },
+    { id: "analysis", label: "Highlight analysis", accepts: ".json,application/json" },
+  ] },
   { id: "transcribe", label: "Generate subtitle", description: "Turn speech from audio or video into timed subtitles.", group: "model", inputs: [{ id: "media", label: "Audio or video", accepts: "audio/*,video/*" }] },
   { id: "translate", label: "Translate", description: "Translate subtitles while preserving every cue time.", group: "model", inputs: [{ id: "subtitles", label: "Subtitle file", accepts: ".srt,.vtt,text/vtt,application/x-subrip" }] },
   { id: "speech-synthesis", label: "Speech synthesis", description: "Create timed narration from translated subtitles.", group: "model", inputs: [{ id: "subtitles", label: "Subtitle file", accepts: ".srt,.vtt,text/vtt,application/x-subrip" }] },
@@ -65,6 +76,24 @@ export async function executeTool({ request, inputs, outputDir, progress }) {
   if (request.toolId === "extract-audio") return extractAudio(inputs.video.file, outputDir, request.options, progress);
   if (request.toolId === "extract-subtitles") return extractSubtitleTrack(inputs.video.file, outputDir, request.options, progress);
   if (request.toolId === "extract-web-captions") return extractCaptionsFromLink(outputDir, request.options, progress);
+  if (request.toolId === "long-video-analyze") {
+    return analyzeLongVideo({
+      mediaFile: inputs.media.file,
+      subtitleFile: inputs.subtitles?.file,
+      outputDir,
+      options: request.options,
+      progress,
+    });
+  }
+  if (request.toolId === "long-video-render") {
+    return renderLongVideoShorts({
+      mediaFile: inputs.media.file,
+      analysisFile: inputs.analysis.file,
+      outputDir,
+      options: request.options,
+      progress,
+    });
+  }
   if (request.toolId === "transcribe") return transcribe(inputs.media.file, outputDir, request.options, progress);
   if (request.toolId === "translate") return translateSubtitles(inputs.subtitles.file, outputDir, request.options, progress);
   if (request.toolId === "speech-synthesis") return synthesizeSpeech(inputs.subtitles.file, outputDir, request.options, progress);
@@ -178,7 +207,12 @@ async function extractCaptionsFromLink(outputDir, options, progress) {
 }
 
 async function transcribe(input, outputDir, options, progress) {
-  await progress("processing", 12, "Loading local speech recognition");
+  const config = sttConfig();
+  await progress(
+    "processing",
+    12,
+    config.provider === "gemini" ? `Preparing audio for ${config.geminiModel}` : "Loading local speech recognition",
+  );
   const result = await transcribeMedia({ input, outputDir, language: options.sourceLanguage });
   await progress("finalizing", 88, "Writing transcript and subtitle files");
   const srtPath = path.join(outputDir, "subtitles.srt");
@@ -187,7 +221,14 @@ async function transcribe(input, outputDir, options, progress) {
   await writeFile(transcriptPath, `${result.text.trim()}\n`, "utf8");
   return {
     assets: { subtitles: await makeAsset(srtPath, "subtitles"), transcript: await makeAsset(transcriptPath, "text") },
-    metadata: { language: result.language, languageProbability: result.languageProbability, cueCount: result.cues.length, fallbackWithoutVad: Boolean(result.fallbackWithoutVad) },
+    metadata: {
+      provider: result.provider,
+      model: result.model,
+      language: result.language,
+      languageProbability: result.languageProbability,
+      cueCount: result.cues.length,
+      fallbackWithoutVad: Boolean(result.fallbackWithoutVad),
+    },
   };
 }
 
@@ -204,6 +245,7 @@ async function translateSubtitles(input, outputDir, options, progress) {
       maxTokens: Math.min(4000, Math.max(1000, JSON.stringify(batch).length * 2)),
       temperature: 0.05,
       thinkingLevel: "low",
+      task: "utility",
     });
     const matches = [...String(generated?.text ?? "").matchAll(/<T\s+id=["']?(\d+)["']?\s*>([\s\S]*?)<\/T>/gi)];
     const byId = new Map(matches.map((match) => [Number(match[1]), match[2].trim()]));
@@ -337,6 +379,14 @@ function normalizeOptions(toolId, options) {
     const language = cleanOption(options.language, 20, "en").toLowerCase();
     if (!/^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/i.test(language)) throw new ToolValidationError("Caption language must be a code such as en, my, or pt-BR.");
     return { url, language };
+  }
+  if (toolId === "long-video-analyze") {
+    try { return validateLongVideoAnalyzeOptions(options); }
+    catch (error) { throw new ToolValidationError(error instanceof Error ? error.message : "Long-video analysis options are invalid."); }
+  }
+  if (toolId === "long-video-render") {
+    try { return validateLongVideoRenderOptions(options); }
+    catch (error) { throw new ToolValidationError(error instanceof Error ? error.message : "Long-video render options are invalid."); }
   }
   if (toolId === "transcribe") return { sourceLanguage: cleanOption(options.sourceLanguage, 40, "auto") };
   if (toolId === "translate") return { targetLanguage: cleanOption(options.targetLanguage, 40, "English") };

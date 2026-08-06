@@ -10,7 +10,7 @@ import { defaultTtsEngine, speechLanguages, ttsEngineOptions } from "../lib/lang
 import { narrators } from "../lib/narrators";
 import { platforms } from "../lib/platforms";
 import { scriptStyles } from "../lib/script-styles";
-import { SERVICE_URL } from "../lib/service";
+import { serviceFetch, SERVICE_URL } from "../lib/service";
 import type {
   Automation, CalendarEntry, LocalJob, NarratorId, PublishingReadiness, ScriptStyle, TtsEngine,
 } from "../lib/types";
@@ -48,7 +48,9 @@ const pipelineColors = ["#6f4bf3", "#18a7b8", "#e49a38", "#df5f9c", "#49b881", "
 const durations = ["30 sec", "60 sec", "60–90 sec", "90 sec", "2 min", "3 min"];
 const week = [["0", "Sun"], ["1", "Mon"], ["2", "Tue"], ["3", "Wed"], ["4", "Thu"], ["5", "Fri"], ["6", "Sat"]];
 
-export function AutomationsView({ setToast, onOpenJob, onOpenSettings }: {
+export function AutomationsView({ authenticated, onRequireAuthentication, setToast, onOpenJob, onOpenSettings }: {
+  authenticated: boolean;
+  onRequireAuthentication: () => boolean;
   setToast: (value: string) => void;
   onOpenJob: (job: LocalJob) => void;
   onOpenSettings: () => void;
@@ -89,10 +91,20 @@ export function AutomationsView({ setToast, onOpenJob, onOpenSettings }: {
   }, [range.end, range.start]);
 
   useEffect(() => {
+    if (!authenticated) {
+      const clear = window.setTimeout(() => {
+        setPipelines([]);
+        setEntries([]);
+        setJobs([]);
+        setReadiness(null);
+      }, 0);
+      serviceFetch(`${SERVICE_URL}/health`).then((response) => setOnline(response.ok)).catch(() => setOnline(false));
+      return () => window.clearTimeout(clear);
+    }
     const initial = window.setTimeout(() => void refresh(true), 0);
     const timer = window.setInterval(() => void refresh(), 8_000);
     return () => { window.clearTimeout(initial); window.clearInterval(timer); };
-  }, [refresh]);
+  }, [authenticated, refresh]);
 
   const calendarPipelines = pipelines.filter((pipeline) => pipeline.mode === "calendar");
   const quickPipelines = pipelines.filter((pipeline) => pipeline.mode === "quick");
@@ -144,6 +156,7 @@ export function AutomationsView({ setToast, onOpenJob, onOpenSettings }: {
   }
 
   async function savePipeline() {
+    if (!authenticated) return void onRequireAuthentication();
     setFormError("");
     if (draft.mode === "calendar" && (!draft.weekdays.length || !draft.times.length)) {
       setFormError("Choose at least one day and one posting time.");
@@ -178,6 +191,7 @@ export function AutomationsView({ setToast, onOpenJob, onOpenSettings }: {
   }
 
   async function togglePipeline(pipeline: Automation) {
+    if (!authenticated) return void onRequireAuthentication();
     setBusyId(pipeline.id);
     try {
       await fetchJson(`${SERVICE_URL}/automations/${pipeline.id}`, {
@@ -193,6 +207,7 @@ export function AutomationsView({ setToast, onOpenJob, onOpenSettings }: {
   }
 
   async function runQuick(pipeline: Automation) {
+    if (!authenticated) return void onRequireAuthentication();
     setBusyId(pipeline.id);
     try {
       await fetchJson(`${SERVICE_URL}/automations/${pipeline.id}/run`, { method: "POST" });
@@ -206,6 +221,7 @@ export function AutomationsView({ setToast, onOpenJob, onOpenSettings }: {
   }
 
   async function deletePipeline(pipeline: Automation) {
+    if (!authenticated) return void onRequireAuthentication();
     if (!window.confirm(`Delete “${pipeline.name}”? Existing video jobs will remain in Library.`)) return;
     setBusyId(pipeline.id);
     try {
@@ -220,6 +236,7 @@ export function AutomationsView({ setToast, onOpenJob, onOpenSettings }: {
   }
 
   async function generateCalendarBriefs(pipeline: Automation) {
+    if (!authenticated) return void onRequireAuthentication();
     setBusyId(pipeline.id);
     try {
       const result = await fetchJson<{ queued: number }>(`${SERVICE_URL}/automations/${pipeline.id}/plan`, { method: "POST" });
@@ -239,6 +256,7 @@ export function AutomationsView({ setToast, onOpenJob, onOpenSettings }: {
   }
 
   async function saveEntryBrief() {
+    if (!authenticated) return void onRequireAuthentication();
     if (!selectedEntry) return;
     setBusyId(selectedEntry.id);
     try {
@@ -256,6 +274,7 @@ export function AutomationsView({ setToast, onOpenJob, onOpenSettings }: {
   }
 
   async function entryAction(action: "run" | "regenerate") {
+    if (!authenticated) return void onRequireAuthentication();
     if (!selectedEntry) return;
     setBusyId(selectedEntry.id);
     try {
@@ -445,4 +464,4 @@ function formatDateTime(value?: string | null) { return value ? new Intl.DateTim
 function nextTime(times: string[]) { const last = times.at(-1) ?? "08:30"; const [hour, minute] = last.split(":").map(Number); return `${String((hour + 3) % 24).padStart(2, "0")}:${String(minute).padStart(2, "0")}`; }
 function entryStatus(entry: CalendarEntry) { return entry.briefState === "generating" ? "Generating brief" : entry.briefState === "pending" ? "Brief pending" : entry.briefState === "failed" ? "Needs attention" : entry.state.replaceAll("_", " "); }
 function messageOf(error: unknown, fallback: string) { return error instanceof Error && error.message ? error.message : fallback; }
-async function fetchJson<T = unknown>(url: string, init?: RequestInit): Promise<T> { const response = await fetch(url, init); const body = await response.json().catch(() => ({})) as { error?: string }; if (!response.ok) throw new Error(body.error || `Request failed (${response.status}).`); return body as T; }
+async function fetchJson<T = unknown>(url: string, init?: RequestInit): Promise<T> { const response = await serviceFetch(url, init); const body = await response.json().catch(() => ({})) as { error?: string }; if (!response.ok) throw new Error(body.error || `Request failed (${response.status}).`); return body as T; }

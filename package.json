@@ -20,6 +20,7 @@
     "voxcpm2:setup": "node scripts/setup-voxcpm2.mjs",
     "stt:setup": "node scripts/setup-stt.mjs",
     "webmedia:setup": "node scripts/setup-web-media.mjs",
+    "conversation:setup": "node scripts/setup-conversation-renderer.mjs",
     "https:setup": "node scripts/setup-https.mjs",
     "check": "npm run lint && npm test",
     "test": "npm run build && node --test tests/*.test.mjs",
@@ -35,6 +36,7 @@
     "lucide-react": "^1.25.0",
     "next": "16.2.10",
     "node-cron": "^4.6.0",
+    "playwright": "1.62.0",
     "react": "19.2.6",
     "react-dom": "19.2.6"
   },

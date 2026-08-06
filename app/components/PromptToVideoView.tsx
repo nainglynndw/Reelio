@@ -26,18 +26,18 @@ import { speechLanguages, ttsEngineOptions, voiceLanguages } from "../lib/langua
 import { narrators } from "../lib/narrators";
 import { platforms } from "../lib/platforms";
 import { scriptStyles } from "../lib/script-styles";
-import { SERVICE_URL } from "../lib/service";
+import { serviceFetch, SERVICE_URL } from "../lib/service";
 import type { LocalJob, NarratorId, ScriptStyle, TtsEngine, VisualCandidate, VisualSelection, VisualTheme } from "../lib/types";
 import { PlatformLogo, SelectField } from "./common";
 
-const guidedSteps = [
+const promptVideoSteps = [
   { label: "Brief", detail: "Topic and direction" },
   { label: "Script", detail: "Generate and approve" },
   { label: "Production", detail: "Voice and captions" },
   { label: "Review", detail: "Confirm and create" },
 ];
 
-export function GuidedCreateView(props: {
+export function PromptToVideoView(props: {
   prompt: string;
   setPrompt: (value: string) => void;
   category: string;
@@ -67,6 +67,7 @@ export function GuidedCreateView(props: {
   stopGeneration: () => void | Promise<void>;
   openJob: (job: LocalJob) => void;
   onCreateAnother: () => void;
+  onBackToModes: () => void;
   onOpenSettings: () => void;
   setToast: (value: string) => void;
   defaultNarratorId: NarratorId;
@@ -108,7 +109,7 @@ export function GuidedCreateView(props: {
   const [stockProviders, setStockProviders] = useState<Record<string, { configured: boolean; available: boolean; returned: boolean }>>({});
   const stockSearchPageRef = useRef(1);
   const scriptWords = script.trim() ? script.trim().split(/\s+/).length : 0;
-  const minimumWords = minimumGuidedWords(props.duration);
+  const minimumWords = minimumPromptVideoWords(props.duration);
   const briefReady = props.prompt.trim().length >= 3;
   const aiTopicReady = props.ideaFocus.trim().length >= 3;
   const scriptReady = scriptWords >= minimumWords;
@@ -264,7 +265,7 @@ export function GuidedCreateView(props: {
     }
     setDrafting(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/script-draft`, {
+      const response = await serviceFetch(`${SERVICE_URL}/script-draft`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -304,7 +305,7 @@ export function GuidedCreateView(props: {
     setConfirmPreviewTranslation(false);
     setVoicePreviewTranslating(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/voice-preview-translation`, {
+      const response = await serviceFetch(`${SERVICE_URL}/voice-preview-translation`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: approvedPreviewLine, targetLanguage: props.language }),
@@ -327,7 +328,7 @@ export function GuidedCreateView(props: {
     }
     setVoicePreviewLoading(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/voice-previews`, {
+      const response = await serviceFetch(`${SERVICE_URL}/voice-previews`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -375,7 +376,7 @@ export function GuidedCreateView(props: {
     }
     setGeneratingThemes(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/visual-themes`, {
+      const response = await serviceFetch(`${SERVICE_URL}/visual-themes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ script, category: props.category }),
@@ -406,7 +407,7 @@ export function GuidedCreateView(props: {
     }
     setGeneratingThemes(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/visual-themes`, {
+      const response = await serviceFetch(`${SERVICE_URL}/visual-themes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ script, category: props.category, localOnly: true }),
@@ -433,7 +434,7 @@ export function GuidedCreateView(props: {
     const page = showDifferentResults ? Math.min(20, stockSearchPageRef.current + 1) : stockSearchPageRef.current;
     setStoryboardLoading(true);
     try {
-      const response = await fetch(`${SERVICE_URL}/visual-candidates`, {
+      const response = await serviceFetch(`${SERVICE_URL}/visual-candidates`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ themes, page }),
@@ -518,7 +519,7 @@ export function GuidedCreateView(props: {
     }
     setCustomVideoUploading((current) => ({ ...current, [themeIndex]: true }));
     try {
-      const response = await fetch(`${SERVICE_URL}/tool-inputs`, {
+      const response = await serviceFetch(`${SERVICE_URL}/tool-inputs`, {
         method: "POST",
         headers: {
           "Content-Type": file.type || "application/octet-stream",
@@ -610,18 +611,19 @@ export function GuidedCreateView(props: {
   }
 
   return (
-    <div className="content-wrap guided-create-page">
+    <div className="content-wrap prompt-to-video-page">
+      <button className="mode-back-button" onClick={props.onBackToModes}><ArrowLeft size={14} /> All video modes</button>
       <div className="page-heading compact-heading">
         <div>
-          <div className="eyebrow"><span /> GUIDED VIDEO CREATOR</div>
-          <h1>Build the video one decision at a time.</h1>
-          <p>Prepare the brief, approve the exact script, then choose production settings before rendering.</p>
+          <div className="eyebrow"><span /> PROMPT TO VIDEO</div>
+          <h1>Turn one idea into a reviewed video.</h1>
+          <p>Prepare the brief, approve the exact script and visuals, then render a complete vertical video package.</p>
         </div>
-        <span className="guided-step-count">Step {step + 1} of {guidedSteps.length}</span>
+        <span className="guided-step-count">Step {step + 1} of {promptVideoSteps.length}</span>
       </div>
 
-      <nav className="guided-stepper" aria-label="Guided creation progress">
-        {guidedSteps.map((item, index) => (
+      <nav className="guided-stepper" aria-label="Prompt to Video progress">
+        {promptVideoSteps.map((item, index) => (
           <button
             key={item.label}
             className={`${index === step ? "active" : ""} ${index < step || index <= furthestStep ? "available" : ""}`}
@@ -638,7 +640,7 @@ export function GuidedCreateView(props: {
       <section className="guided-card">
         {step === 0 && (
           <>
-            <GuidedSectionHeader number="01" title="Start with a clear brief" detail="Write the direction yourself, or use an optional AI helper after choosing a specific topic." />
+            <PromptVideoSectionHeader number="01" title="Start with a clear brief" detail="Write the direction yourself, or use an optional AI helper after choosing a specific topic." />
             <label className="guided-brief-field">
               <span>Write your video brief</span>
               <textarea id="guided-brief" value={props.prompt} onChange={(event) => updatePrompt(event.target.value)} placeholder="Describe the topic, hook, important facts, audience, and takeaway…" maxLength={1200} />
@@ -677,13 +679,13 @@ export function GuidedCreateView(props: {
                 </div>
               )}
             </section>
-            <GuidedFooter next="Continue to script" onNext={continueFromBrief} disabled={!briefReady} />
+            <PromptVideoFooter next="Continue to script" onNext={continueFromBrief} disabled={!briefReady} />
           </>
         )}
 
         {step === 1 && (
           <>
-            <GuidedSectionHeader number="02" title="Approve the exact script" detail="Rendering will use this reviewed English master instead of writing another script later." />
+            <PromptVideoSectionHeader number="02" title="Approve the exact script" detail="Rendering will use this reviewed English master instead of writing another script later." />
             <div className="guided-brief-summary">
               <header>
                 <span><FileText size={14} /><strong>Your brief</strong></span>
@@ -738,13 +740,13 @@ export function GuidedCreateView(props: {
                 </label>
               </>
             )}
-            <GuidedFooter back="Back to brief" next="Approve and continue" onBack={() => moveTo(0)} onNext={approveScript} disabled={!scriptReady} />
+            <PromptVideoFooter back="Back to brief" next="Approve and continue" onBack={() => moveTo(0)} onNext={approveScript} disabled={!scriptReady} />
           </>
         )}
 
         {step === 2 && (
           <>
-            <GuidedSectionHeader number="03" title="Choose production settings" detail="Recommended defaults are already selected and can be changed before rendering." />
+            <PromptVideoSectionHeader number="03" title="Choose production settings" detail="Recommended defaults are already selected and can be changed before rendering." />
             <div className="guided-production-grid">
               <SelectField icon={<Mic2 size={15} />} label="Speech language" value={props.language} onChange={changeSpeechLanguage} options={speechLanguages} />
               <SelectField icon={<Zap size={15} />} label="Voice engine" value={props.ttsEngine} onChange={changeVoiceEngine} options={ttsEngineOptions(props.language)} />
@@ -1014,13 +1016,13 @@ export function GuidedCreateView(props: {
                 return <button key={platform.id} className={selected ? "selected" : ""} onClick={() => props.togglePlatform(platform.id)}><PlatformLogo platform={platform} /><span>{platform.label}</span><i>{selected && <Check size={11} />}</i></button>;
               })}</div>
             </div>
-            <GuidedFooter back="Back to script" next="Review video" onBack={() => moveTo(1)} onNext={() => moveTo(3)} disabled={!productionReady} />
+            <PromptVideoFooter back="Back to script" next="Review video" onBack={() => moveTo(1)} onNext={() => moveTo(3)} disabled={!productionReady} />
           </>
         )}
 
         {step === 3 && (
           <>
-            <GuidedSectionHeader number="04" title="Review and create your video" detail="Check the final choices, then start creating the finished video." />
+            <PromptVideoSectionHeader number="04" title="Review and create your video" detail="Check the final choices, then start creating the finished video." />
             <div className="guided-review-grid">
               <ReviewItem label="Topic" value={props.prompt} />
               <ReviewItem label="Duration" value={props.duration} />
@@ -1071,11 +1073,11 @@ export function GuidedCreateView(props: {
   );
 }
 
-function GuidedSectionHeader({ number, title, detail }: { number: string; title: string; detail: string }) {
+function PromptVideoSectionHeader({ number, title, detail }: { number: string; title: string; detail: string }) {
   return <header className="guided-section-header"><span>{number}</span><div><h2>{title}</h2><p>{detail}</p></div></header>;
 }
 
-function GuidedFooter({ back, next, onBack, onNext, disabled = false }: { back?: string; next: string; onBack?: () => void; onNext: () => void; disabled?: boolean }) {
+function PromptVideoFooter({ back, next, onBack, onNext, disabled = false }: { back?: string; next: string; onBack?: () => void; onNext: () => void; disabled?: boolean }) {
   return <footer className="guided-footer">{onBack && <button className="guided-back-button" onClick={onBack}><ArrowLeft size={14} /> {back}</button>}<button className="guided-next-button" disabled={disabled} onClick={onNext}>{next} <ArrowRight size={14} /></button></footer>;
 }
 
@@ -1095,7 +1097,7 @@ function firstVoicePreviewSentence(value: string) {
   return `${shortened || sentence.slice(0, 219)}…`;
 }
 
-function minimumGuidedWords(duration: string) {
+function minimumPromptVideoWords(duration: string) {
   const targetSeconds = duration === "60 sec" ? 60
     : duration === "75 sec" ? 75
       : duration === "90 sec" ? 90

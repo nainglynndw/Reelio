@@ -1,7 +1,19 @@
 import { copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { getDatabasePath, initializeDatabase, localWorkspaceOwnerId, readWorkspaceState, writeWorkspaceState } from "./database.mjs";
 
-const emptyState = { jobs: [], automations: [], calendarEntries: [], toolJobs: [], toolInputs: [], brandKit: null };
+const emptyState = {
+  version: 2,
+  jobs: [],
+  automations: [],
+  calendarEntries: [],
+  toolJobs: [],
+  toolInputs: [],
+  conversationDrafts: [],
+  conversationAssets: [],
+  brandKit: null,
+  brandKits: {},
+};
 let state = structuredClone(emptyState);
 let root;
 let statePath;
@@ -16,24 +28,45 @@ export async function initializeStore() {
   tempPath = path.join(root, "state.tmp.json");
   backupPath = path.join(root, "state.backup.json");
   await mkdir(path.join(root, "generated"), { recursive: true });
-  try {
+  initializeDatabase(root);
+  const databaseState = readWorkspaceState();
+  if (databaseState) {
+    state = databaseState;
+  } else try {
     state = await readState(statePath);
+    writeWorkspaceState(state);
   } catch (primaryError) {
     try {
       state = await readState(backupPath);
       preserveBackupOnNextPersist = true;
+      writeWorkspaceState(state);
     } catch (backupError) {
       if (primaryError?.code !== "ENOENT" || backupError?.code !== "ENOENT") {
         throw new Error("Reelio state is unreadable. Restore state.json or state.backup.json before starting.");
       }
       state = structuredClone(emptyState);
+      writeWorkspaceState(state);
     }
   }
   validateState(state);
   state.toolJobs ??= [];
   state.toolInputs ??= [];
+  state.conversationDrafts ??= [];
+  state.conversationAssets ??= [];
   state.calendarEntries ??= [];
   state.brandKit ??= null;
+  state.brandKits ??= {};
+  state.version = Math.max(2, Number(state.version ?? 1));
+  const legacyOwnerUserId = localWorkspaceOwnerId();
+  if (legacyOwnerUserId) {
+    for (const collection of [state.jobs, state.toolJobs, state.toolInputs, state.conversationDrafts, state.conversationAssets, state.automations]) {
+      for (const resource of collection) resource.ownerUserId ??= legacyOwnerUserId;
+    }
+    if (state.brandKit) {
+      state.brandKit.ownerUserId ??= legacyOwnerUserId;
+      state.brandKits[legacyOwnerUserId] ??= structuredClone(state.brandKit);
+    }
+  }
   const recoveredJobIds = [];
   for (const job of state.jobs) {
     if (job.state === "running" || job.state === "queued") {
@@ -64,7 +97,7 @@ export async function initializeStore() {
     }
   }
   await persist();
-  return { recoveredJobIds, recoveredToolJobIds, root };
+  return { recoveredJobIds, recoveredToolJobIds, root, databasePath: getDatabasePath() };
 }
 
 export function getRoot() {
@@ -145,14 +178,70 @@ export async function addToolInput(input) {
   return input;
 }
 
-export function getBrandKit() {
-  return state.brandKit ? structuredClone(state.brandKit) : null;
+export function listConversationDrafts() {
+  return [...state.conversationDrafts].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
-export async function setBrandKit(brandKit) {
-  state.brandKit = brandKit ? structuredClone(brandKit) : null;
+export function getConversationDraft(id) {
+  return state.conversationDrafts.find((draft) => draft.id === id) ?? null;
+}
+
+export async function addConversationDraft(draft) {
+  state.conversationDrafts.push(draft);
   await persist();
-  return getBrandKit();
+  return draft;
+}
+
+export async function patchConversationDraft(id, patch) {
+  const draft = getConversationDraft(id);
+  if (!draft) return null;
+  Object.assign(draft, patch, { updatedAt: new Date().toISOString() });
+  await persist();
+  return draft;
+}
+
+export async function removeConversationDraft(id) {
+  const index = state.conversationDrafts.findIndex((draft) => draft.id === id);
+  if (index < 0) return null;
+  const [removed] = state.conversationDrafts.splice(index, 1);
+  await persist({ mirrorBackup: true });
+  return removed;
+}
+
+export function listConversationAssets() {
+  return [...state.conversationAssets].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function getConversationAsset(id) {
+  return state.conversationAssets.find((asset) => asset.id === id) ?? null;
+}
+
+export async function addConversationAsset(asset) {
+  state.conversationAssets.push(asset);
+  await persist();
+  return asset;
+}
+
+export async function removeConversationAsset(id) {
+  const index = state.conversationAssets.findIndex((asset) => asset.id === id);
+  if (index < 0) return null;
+  const [removed] = state.conversationAssets.splice(index, 1);
+  await persist({ mirrorBackup: true });
+  return removed;
+}
+
+export function getBrandKit(ownerUserId = localWorkspaceOwnerId()) {
+  const brandKit = ownerUserId ? state.brandKits?.[ownerUserId] : null;
+  return brandKit ? structuredClone(brandKit) : null;
+}
+
+export async function setBrandKit(brandKit, ownerUserId = localWorkspaceOwnerId()) {
+  if (!ownerUserId) throw new Error("A user is required to save a Brand Kit.");
+  state.brandKits ??= {};
+  state.brandKits[ownerUserId] = brandKit ? structuredClone({ ...brandKit, ownerUserId }) : null;
+  if (ownerUserId === localWorkspaceOwnerId()) state.brandKit = state.brandKits[ownerUserId];
+  await persist();
+  return getBrandKit(ownerUserId);
 }
 
 export function listAutomations() {
@@ -222,6 +311,7 @@ async function persist({ mirrorBackup = false } = {}) {
   preserveBackupOnNextPersist = false;
   persistQueue = persistQueue.then(async () => {
     await mkdir(root, { recursive: true });
+    writeWorkspaceState(JSON.parse(snapshot));
     await writeFile(tempPath, snapshot, "utf8");
     if (!preserveBackup) {
       await copyFile(statePath, backupPath).catch((error) => {
@@ -242,7 +332,10 @@ function validateState(value) {
   if (!value || typeof value !== "object" || !Array.isArray(value.jobs) || !Array.isArray(value.automations)
     || (value.calendarEntries != null && !Array.isArray(value.calendarEntries))
     || (value.toolJobs != null && !Array.isArray(value.toolJobs)) || (value.toolInputs != null && !Array.isArray(value.toolInputs))
-    || (value.brandKit != null && (typeof value.brandKit !== "object" || Array.isArray(value.brandKit)))) {
+    || (value.conversationDrafts != null && !Array.isArray(value.conversationDrafts))
+    || (value.conversationAssets != null && !Array.isArray(value.conversationAssets))
+    || (value.brandKit != null && (typeof value.brandKit !== "object" || Array.isArray(value.brandKit)))
+    || (value.brandKits != null && (typeof value.brandKits !== "object" || Array.isArray(value.brandKits)))) {
     throw new Error("Reelio state file has an invalid shape.");
   }
 }

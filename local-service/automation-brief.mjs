@@ -38,10 +38,11 @@ export async function generateAutomationBrief(automation, recentBriefs = []) {
       maxTokens: 650,
       temperature: 0.25,
       thinkingLevel: "medium",
+      task: "creative",
     });
     const brief = normalizeIdeaOutput(generated?.text);
     if (!brief) throw new ValidationError("No usable current-news brief was produced.", 502);
-    return { brief, title: firstLine(brief), provider: generated.provider, model: generated.model, sources: research.sources };
+    return { brief, title: firstLine(brief), provider: generated.provider, model: generated.model, fallback: generated.fallback ?? null, sources: research.sources };
   }
 
   const generated = await generateText({
@@ -52,10 +53,11 @@ export async function generateAutomationBrief(automation, recentBriefs = []) {
     maxTokens: 650,
     temperature: 0.72,
     thinkingLevel: "medium",
+    task: "creative",
   });
   const brief = normalizeIdeaOutput(generated?.text);
   if (!brief) throw new ValidationError("The AI did not return a usable automation brief.", 502);
-  return { brief, title: firstLine(brief), provider: generated.provider, model: generated.model, sources: [] };
+  return { brief, title: firstLine(brief), provider: generated.provider, model: generated.model, fallback: generated.fallback ?? null, sources: [] };
 }
 
 export function firstLine(value) {
